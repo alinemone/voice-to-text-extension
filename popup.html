@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="fa-IR" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>تبدیل صدا به متن</title>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>🎤 تبدیل صدا به متن</h1>
+      <p class="subtitle">Voice to Text - Powered by Google Gemini</p>
+    </header>
+    <main>
+      <section class="setting-group">
+        <label for="apiKey">🔑 توکن API گوگل جمینی</label>
+        <div class="token-row">
+          <input id="apiKey" type="password" placeholder="توکن API خود را وارد کنید" />
+          <button id="saveToken" type="button">ذخیره</button>
+        </div>
+        <p class="hint">توکن در دستگاه شما ذخیره می‌شود. <a href="https://aistudio.google.com/app/apikey" target="_blank">دریافت توکن</a></p>
+      </section>
+
+      <section class="setting-group">
+        <label for="model">🤖 انتخاب مدل</label>
+        <div class="token-row">
+          <select id="model"></select>
+          <button id="saveModel" type="button">ذخیره</button>
+        </div>
+        <p class="hint">مدل مورد نظر را انتخاب کنید (پیشنهادی: gemini-2.5-flash-lite)</p>
+      </section>
+
+      <section class="setting-group">
+        <label for="dictationLanguage">🌐 زبان تبدیل صدا به متن</label>
+        <div class="token-row">
+          <select id="dictationLanguage">
+            <option value="fa-IR">فارسی (Persian)</option>
+            <option value="en-US">انگلیسی (English)</option>
+          </select>
+          <button id="saveDictationLanguage" type="button">ذخیره</button>
+        </div>
+        <p class="hint">زبان مورد نظر برای تشخیص گفتار را انتخاب کنید</p>
+      </section>
+
+      <section class="setting-group">
+        <label for="showVoiceButtons">👁️ نمایش دکمه میکروفن</label>
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="showVoiceButtons" checked />
+            <span class="slider"></span>
+          </label>
+          <span class="toggle-label">دکمه‌های میکروفن در سایت‌ها نمایش داده شود</span>
+        </div>
+        <p class="hint">برای مخفی کردن دکمه‌های میکروفن در صفحات وب، این گزینه را خاموش کنید</p>
+      </section>
+
+      <section class="setting-group">
+        <label for="onlyTextarea">📄 فقط برای Textarea</label>
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="onlyTextarea" />
+            <span class="slider"></span>
+          </label>
+          <span class="toggle-label">فقط کنار textarea دکمه نمایش داده شود (نه input ها)</span>
+        </div>
+        <p class="hint">
+          <strong>خاموش:</strong> دکمه کنار input و textarea ظاهر می‌شود<br>
+          <strong>روشن:</strong> فقط کنار textarea ظاهر می‌شود (برای متن‌های بلند)
+        </p>
+      </section>
+
+      <section class="setting-group">
+        <label for="allowedSites">🌍 سایت‌های مجاز (اختیاری)</label>
+        <textarea
+          id="allowedSites"
+          rows="5"
+          placeholder="google.com
+youtube.com
+*.wikipedia.org
+github.com"
+        ></textarea>
+        <div class="button-row">
+          <button id="saveAllowedSites" type="button">ذخیره</button>
+          <button id="clearAllowedSites" type="button" style="background: #ef4444;">پاک کردن</button>
+        </div>
+        <p class="hint">
+          <strong>خالی:</strong> همه سایت‌ها فعال<br>
+          <strong>پر:</strong> فقط سایت‌های لیست فعال<br>
+          هر خط یک دامنه (مثل google.com یا *.google.com)
+        </p>
+      </section>
+
+      <p class="status" id="status" aria-live="polite"></p>
+    </main>
+
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
