@@ -445,6 +445,25 @@ function handleRecognitionEnd(session) {
 
   session.restartAttempts += 1;
   
+  // حفظ متن قبلی (هم final و هم interim) قبل از restart
+  const textToPreserve = session.finalText + (session.interimText || "");
+  if (textToPreserve) {
+    session.baseText = combineText(session.baseText, textToPreserve, "");
+    session.finalText = "";
+    session.interimText = "";
+    
+    // آپدیت فیلد با متن حفظ شده
+    session.updatingText = true;
+    setElementText(session.element, session.baseText);
+    setTimeout(() => {
+      if (session.updatingText) {
+        session.updatingText = false;
+      }
+    }, 100);
+    
+    console.log("📝 Preserved text before restart:", session.baseText);
+  }
+  
   try {
     session.recognition.start();
   } catch (error) {
