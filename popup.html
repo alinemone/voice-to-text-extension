@@ -10,29 +10,12 @@
   <body>
     <header>
       <h1>🎤 تبدیل صدا به متن</h1>
-      <p class="subtitle">Voice to Text - Powered by Google Gemini</p>
+      <p class="subtitle">Voice to Text - Powered by Chrome Speech API</p>
     </header>
     <main>
+      
       <section class="setting-group">
-        <label for="apiKey">🔑 توکن API گوگل جمینی</label>
-        <div class="token-row">
-          <input id="apiKey" type="password" placeholder="توکن API خود را وارد کنید" />
-          <button id="saveToken" type="button">ذخیره</button>
-        </div>
-        <p class="hint">توکن در دستگاه شما ذخیره می‌شود. <a href="https://aistudio.google.com/app/apikey" target="_blank">دریافت توکن</a></p>
-      </section>
-
-      <section class="setting-group">
-        <label for="model">🤖 انتخاب مدل</label>
-        <div class="token-row">
-          <select id="model"></select>
-          <button id="saveModel" type="button">ذخیره</button>
-        </div>
-        <p class="hint">مدل مورد نظر را انتخاب کنید (پیشنهادی: gemini-2.5-flash-lite)</p>
-      </section>
-
-      <section class="setting-group">
-        <label for="dictationLanguage">🌐 زبان تبدیل صدا به متن</label>
+        <label for="dictationLanguage">🌐 زبان تشخیص گفتار</label>
         <div class="token-row">
           <select id="dictationLanguage">
             <option value="fa-IR">فارسی (Persian)</option>
@@ -56,17 +39,66 @@
       </section>
 
       <section class="setting-group">
-        <label for="onlyTextarea">📄 فقط برای Textarea</label>
-        <div class="toggle-row">
-          <label class="switch">
-            <input type="checkbox" id="onlyTextarea" />
-            <span class="slider"></span>
+        <div class="field-types-header">
+          <h3>📝 انتخاب نوع فیلدها</h3>
+          <p class="hint">مشخص کنید در کدام نوع فیلدها دکمه میکروفن نمایش داده شود</p>
+        </div>
+        
+        <div class="checkbox-grid">
+          <label class="checkbox-item">
+            <input type="checkbox" id="enableTextarea" checked />
+            <span>Textarea (متن بلند)</span>
           </label>
-          <span class="toggle-label">فقط کنار textarea دکمه نمایش داده شود (نه input ها)</span>
+          
+          <label class="checkbox-item">
+            <input type="checkbox" id="enableInputText" value="text" />
+            <span>Input Text</span>
+          </label>
+          
+          <label class="checkbox-item">
+            <input type="checkbox" id="enableInputSearch" value="search" />
+            <span>Input Search</span>
+          </label>
+          
+          <label class="checkbox-item">
+            <input type="checkbox" id="enableInputEmail" value="email" />
+            <span>Input Email</span>
+          </label>
+          
+          <label class="checkbox-item">
+            <input type="checkbox" id="enableInputUrl" value="url" />
+            <span>Input URL</span>
+          </label>
+          
+          <label class="checkbox-item">
+            <input type="checkbox" id="enableInputTel" value="tel" />
+            <span>Input Tel</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="setting-group">
+        <label for="customSelectors">🎯 سلکتورهای سفارشی CSS</label>
+        <textarea
+          id="customSelectors"
+          rows="5"
+          placeholder=".my-editor[contenteditable]
+#comment-box
+textarea.custom-textarea
+input.voice-enabled[type='text']
+div[contenteditable='true']"
+        ></textarea>
+        <div class="button-row">
+          <button id="saveCustomSelectors" type="button">ذخیره</button>
+          <button id="clearCustomSelectors" type="button" style="background: #ef4444;">پاک کردن</button>
         </div>
         <p class="hint">
-          <strong>خاموش:</strong> دکمه کنار input و textarea ظاهر می‌شود<br>
-          <strong>روشن:</strong> فقط کنار textarea ظاهر می‌شود (برای متن‌های بلند)
+          <strong>⚠️ مهم:</strong> Element باید input، textarea یا contenteditable باشد<br>
+          <strong>مثال‌های صحیح:</strong><br>
+          • <code>.my-class</code> (اگر input/textarea باشد)<br>
+          • <code>#editor[contenteditable]</code> (div قابل ویرایش)<br>
+          • <code>textarea.custom</code> (textarea با کلاس)<br>
+          • <code>[data-voice="true"]</code> (attribute selector)
         </p>
       </section>
 

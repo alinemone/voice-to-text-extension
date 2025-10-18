@@ -1,4 +1,3 @@
-const EDITABLE_SELECTOR = "input[type='text'], input[type='search'], input[type='email'], input[type='url'], input[type='tel'], input:not([type]), textarea";
 const BUTTON_CONTAINER_CLASS = "gemini-voice-controls";
 const BUTTON_CLASS = "gemini-voice-dictation";
 const REMOVE_BUTTON_CLASS = "gemini-voice-remove";
@@ -11,9 +10,12 @@ let dictationSession = null;
 let mutationObserver;
 let dictationLanguagePreference = "fa-IR";
 let showVoiceButtons = true;
-let onlyTextarea = true;
+let enableTextarea = true;
+let enabledInputTypes = [];
+let customSelectors = [];
 let allowedSites = [];
 let currentHostname = "";
+let cachedEditableSelector = "";
 
 const VOICE_COMMANDS = {
   "fa": {
@@ -65,24 +67,38 @@ try {
 chrome.storage?.local?.get([
   "dictationLanguage",
   "showVoiceButtons",
-  "onlyTextarea",
+  "enableTextarea",
+  "enabledInputTypes",
+  "customSelectors",
   "allowedSites"
-], ({ dictationLanguage, showVoiceButtons: showButtons, onlyTextarea: textareaOnly, allowedSites: sites }) => {
+], (stored) => {
   console.log("🔧 Extension loaded on:", currentHostname);
-  console.log("📋 Settings:", { 
-    showButtons, 
-    allowedSites: sites || "(empty - all sites allowed)",
-    language: dictationLanguage 
-  });
+  console.log("📋 Settings:", stored);
   
-  updateDictationLanguage(dictationLanguage);
-  if (typeof showButtons === "boolean") {
-    showVoiceButtons = showButtons;
+  updateDictationLanguage(stored.dictationLanguage);
+  
+  if (typeof stored.showVoiceButtons === "boolean") {
+    showVoiceButtons = stored.showVoiceButtons;
   }
-  if (typeof textareaOnly === "boolean") {
-    onlyTextarea = textareaOnly;
+  
+  if (typeof stored.enableTextarea === "boolean") {
+    enableTextarea = stored.enableTextarea;
   }
-  updateAllowedSites(sites);
+  
+  if (Array.isArray(stored.enabledInputTypes)) {
+    enabledInputTypes = stored.enabledInputTypes;
+  }
+  
+  updateCustomSelectors(stored.customSelectors);
+  updateAllowedSites(stored.allowedSites);
+  buildEditableSelector();
+  
+  console.log("🔍 Loaded settings:", {
+    enableTextarea,
+    enabledInputTypes,
+    customSelectors,
+    cachedEditableSelector
+  });
   
   if (document.readyState !== "loading") {
     refreshVoiceButtons();
@@ -95,15 +111,47 @@ chrome.storage?.onChanged?.addListener((changes, area) => {
   if (area !== "local") {
     return;
   }
+  
+  let needsRefresh = false;
+  let needsRebuild = false;
+  
   if (Object.prototype.hasOwnProperty.call(changes, "dictationLanguage")) {
     updateDictationLanguage(changes.dictationLanguage.newValue);
   }
+  
   if (Object.prototype.hasOwnProperty.call(changes, "showVoiceButtons")) {
     showVoiceButtons = changes.showVoiceButtons.newValue;
-    refreshVoiceButtons();
+    needsRefresh = true;
   }
+  
+  if (Object.prototype.hasOwnProperty.call(changes, "enableTextarea")) {
+    enableTextarea = changes.enableTextarea.newValue;
+    needsRebuild = true;
+    needsRefresh = true;
+  }
+  
+  if (Object.prototype.hasOwnProperty.call(changes, "enabledInputTypes")) {
+    enabledInputTypes = changes.enabledInputTypes.newValue;
+    needsRebuild = true;
+    needsRefresh = true;
+  }
+  
+  if (Object.prototype.hasOwnProperty.call(changes, "customSelectors")) {
+    updateCustomSelectors(changes.customSelectors.newValue);
+    needsRebuild = true;
+    needsRefresh = true;
+  }
+  
   if (Object.prototype.hasOwnProperty.call(changes, "allowedSites")) {
     updateAllowedSites(changes.allowedSites.newValue);
+    needsRefresh = true;
+  }
+  
+  if (needsRebuild) {
+    buildEditableSelector();
+  }
+  
+  if (needsRefresh) {
     refreshVoiceButtons();
   }
 });
@@ -131,7 +179,7 @@ function scanForEditables(root) {
     return;
   }
 
-  if (!showVoiceButtons || !isSiteAllowed()) {
+  if (!showVoiceButtons || !isSiteAllowed() || !cachedEditableSelector) {
     return;
   }
 
@@ -139,7 +187,7 @@ function scanForEditables(root) {
     attachVoiceButton(root);
   }
 
-  const nodes = root.querySelectorAll?.(EDITABLE_SELECTOR) || [];
+  const nodes = root.querySelectorAll?.(cachedEditableSelector) || [];
   for (const node of nodes) {
     if (isVoiceEligible(node)) {
       attachVoiceButton(node);
@@ -232,7 +280,11 @@ function removeVoiceButtons(root) {
     teardownVoiceButton(root);
   }
 
-  const nodes = root.querySelectorAll?.(EDITABLE_SELECTOR) || [];
+  if (!cachedEditableSelector) {
+    return;
+  }
+
+  const nodes = root.querySelectorAll?.(cachedEditableSelector) || [];
   for (const node of nodes) {
     if (buttonMap.has(node)) {
       teardownVoiceButton(node);
@@ -306,6 +358,7 @@ function startDictation(element, button) {
     interimText: "",
     stoppedManually: false,
     updatingText: false,
+    restartAttempts: 0,
     onUserInput,
     onFocusLost
   };
@@ -318,10 +371,14 @@ function startDictation(element, button) {
 
   recognition.onresult = (event) => handleDictationResult(session, event);
   recognition.onerror = (event) => {
+    if (event.error === "no-speech" || event.error === "audio-capture") {
+      console.log("⚠️ Recognition error:", event.error, "- will retry");
+      return;
+    }
     notifyButton(button, event.error || "Voice error");
     stopDictation(true);
   };
-  recognition.onend = () => finalizeDictation(session);
+  recognition.onend = () => handleRecognitionEnd(session);
 
   try {
     recognition.start();
@@ -367,6 +424,48 @@ function handleDictationResult(session, event) {
   }, 100);
 }
 
+function handleRecognitionEnd(session) {
+  if (dictationSession !== session) {
+    return;
+  }
+
+  if (session.stoppedManually) {
+    finalizeDictation(session);
+    return;
+  }
+
+  console.log("🔄 Recognition ended, restarting for continuous recording...");
+  
+  const MAX_RESTART_ATTEMPTS = 50;
+  if (session.restartAttempts >= MAX_RESTART_ATTEMPTS) {
+    console.log("❌ Max restart attempts reached, stopping...");
+    finalizeDictation(session);
+    return;
+  }
+
+  session.restartAttempts += 1;
+  
+  try {
+    session.recognition.start();
+  } catch (error) {
+    console.error("❌ Failed to restart recognition:", error);
+    if (error.name === "InvalidStateError") {
+      setTimeout(() => {
+        if (dictationSession === session && !session.stoppedManually) {
+          try {
+            session.recognition.start();
+          } catch (retryError) {
+            console.error("❌ Retry failed:", retryError);
+            finalizeDictation(session);
+          }
+        }
+      }, 100);
+    } else {
+      finalizeDictation(session);
+    }
+  }
+}
+
 function stopDictation(cancelled = false) {
   if (!dictationSession) {
     return;
@@ -386,7 +485,7 @@ function finalizeDictation(session) {
     return;
   }
 
-  const { element, button, baseText, finalText, stoppedManually, onUserInput, onFocusLost } = session;
+  const { element, button, baseText, finalText, onUserInput, onFocusLost } = session;
   
   if (onUserInput) {
     element.removeEventListener("keydown", onUserInput);
@@ -397,12 +496,7 @@ function finalizeDictation(session) {
   }
 
   const completed = combineText(baseText, finalText, "");
-
-  if (!finalText && stoppedManually) {
-    setElementText(element, baseText);
-  } else {
-    setElementText(element, completed);
-  }
+  setElementText(element, completed);
 
   button.classList.remove(LISTENING_CLASS);
   button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
@@ -497,12 +591,14 @@ function addVoiceButtonStyles() {
       display: inline-flex !important;
       gap: 4px !important;
       margin-left: 6px !important;
-      vertical-align: middle !important;
+      vertical-align: top !important;
       position: relative !important;
       z-index: 2147483647 !important;
       pointer-events: auto !important;
       opacity: 1 !important;
       visibility: visible !important;
+      flex-shrink: 0 !important;
+      align-items: flex-start !important;
     }
     
     .${BUTTON_CLASS},
@@ -515,7 +611,7 @@ function addVoiceButtonStyles() {
       align-items: center !important;
       justify-content: center !important;
       line-height: 1 !important;
-      vertical-align: middle !important;
+      vertical-align: top !important;
       transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.08) !important;
       position: relative !important;
@@ -525,13 +621,14 @@ function addVoiceButtonStyles() {
       -webkit-user-select: none !important;
       opacity: 1 !important;
       visibility: visible !important;
+      flex-shrink: 0 !important;
+      width: 32px !important;
+      height: 32px !important;
     }
     
     .${BUTTON_CLASS} {
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
       color: #ffffff !important;
-      min-width: 32px !important;
-      min-height: 32px !important;
     }
     
     .${BUTTON_CLASS}:hover {
@@ -551,8 +648,7 @@ function addVoiceButtonStyles() {
     .${REMOVE_BUTTON_CLASS} {
       background: linear-gradient(135deg, #64748b 0%, #475569 100%) !important;
       color: #ffffff !important;
-      min-width: 28px !important;
-      min-height: 32px !important;
+      width: 28px !important;
     }
     
     .${REMOVE_BUTTON_CLASS}:hover {
@@ -578,6 +674,14 @@ function addVoiceButtonStyles() {
     .${REMOVE_BUTTON_CLASS} svg {
       display: block !important;
       pointer-events: none !important;
+      width: 16px !important;
+      height: 16px !important;
+      flex-shrink: 0 !important;
+    }
+    
+    .${REMOVE_BUTTON_CLASS} svg {
+      width: 14px !important;
+      height: 14px !important;
     }
   `;
   (document.head || document.documentElement || document.body || document).appendChild(style);
@@ -587,20 +691,37 @@ function isVoiceEligible(element) {
   if (!(element instanceof HTMLElement)) {
     return false;
   }
+  
   if (element.dataset.geminiVoiceIgnore === "true") {
     return false;
   }
   
-  if (element instanceof HTMLTextAreaElement) {
+  if (element instanceof HTMLTextAreaElement && enableTextarea) {
     return true;
   }
   
   if (element instanceof HTMLInputElement) {
-    if (onlyTextarea) {
-      return false;
+    const inputType = element.type || "text";
+    if (enabledInputTypes.includes(inputType)) {
+      return true;
     }
-    const allowedTypes = ["text", "search", "email", "url", "tel", ""];
-    return allowedTypes.includes(element.type);
+  }
+  
+  if (customSelectors.length > 0) {
+    for (const selector of customSelectors) {
+      try {
+        if (element.matches(selector)) {
+          if (element instanceof HTMLInputElement || 
+              element instanceof HTMLTextAreaElement || 
+              isContentEditable(element)) {
+            return true;
+          }
+          console.warn(`Element matches selector "${selector}" but is not editable:`, element);
+        }
+      } catch (e) {
+        console.warn("Invalid selector:", selector, e);
+      }
+    }
   }
   
   return false;
@@ -612,6 +733,41 @@ function updateDictationLanguage(value) {
   } else {
     dictationLanguagePreference = "fa-IR";
   }
+}
+
+function updateCustomSelectors(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    customSelectors = [];
+    return;
+  }
+  
+  customSelectors = value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  
+  console.log("Custom selectors updated:", customSelectors);
+}
+
+function buildEditableSelector() {
+  const selectors = [];
+  
+  if (enableTextarea) {
+    selectors.push("textarea");
+  }
+  
+  if (enabledInputTypes.length > 0) {
+    for (const type of enabledInputTypes) {
+      selectors.push(`input[type='${type}']`);
+    }
+  }
+  
+  if (customSelectors.length > 0) {
+    selectors.push(...customSelectors);
+  }
+  
+  cachedEditableSelector = selectors.join(", ");
+  console.log("Built selector:", cachedEditableSelector);
 }
 
 function applyVoiceCommands(text) {

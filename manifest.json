@@ -1,15 +1,12 @@
 {
   "manifest_version": 3,
   "name": "تبدیل صدا به متن - Voice to Text",
-  "version": "1.0.0",
-  "description": "تبدیل آسان صدا به متن با Google Gemini AI - پشتیبانی از فارسی و انگلیسی",
+  "version": "2.0.0",
+  "description": "تبدیل آسان صدا به متن با Chrome Speech API - پشتیبانی از چندین زبان و کاملا قابل سفارشی‌سازی",
   "permissions": [
     "storage",
     "scripting",
     "activeTab"
-  ],
-  "host_permissions": [
-    "https://generativelanguage.googleapis.com/*"
   ],
   "action": {
     "default_popup": "popup.html",

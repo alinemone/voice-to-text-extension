@@ -1,45 +1,39 @@
-const DEFAULT_MODELS = [
-  "models/gemini-1.5-flash-latest",
-  "models/gemini-1.5-pro-latest",
-  "models/gemini-1.0-pro",
-  "models/gemini-1.0-pro-vision"
-];
-
-const apiKeyInput = document.getElementById("apiKey");
-const saveTokenButton = document.getElementById("saveToken");
-const modelSelect = document.getElementById("model");
-const saveModelButton = document.getElementById("saveModel");
 const dictationLanguageSelect = document.getElementById("dictationLanguage");
 const saveDictationLanguageButton = document.getElementById("saveDictationLanguage");
 const showVoiceButtonsCheckbox = document.getElementById("showVoiceButtons");
-const onlyTextareaCheckbox = document.getElementById("onlyTextarea");
+const enableTextareaCheckbox = document.getElementById("enableTextarea");
+const enableInputTextCheckbox = document.getElementById("enableInputText");
+const enableInputSearchCheckbox = document.getElementById("enableInputSearch");
+const enableInputEmailCheckbox = document.getElementById("enableInputEmail");
+const enableInputUrlCheckbox = document.getElementById("enableInputUrl");
+const enableInputTelCheckbox = document.getElementById("enableInputTel");
+const customSelectorsInput = document.getElementById("customSelectors");
+const saveCustomSelectorsButton = document.getElementById("saveCustomSelectors");
+const clearCustomSelectorsButton = document.getElementById("clearCustomSelectors");
 const allowedSitesInput = document.getElementById("allowedSites");
 const saveAllowedSitesButton = document.getElementById("saveAllowedSites");
 const clearAllowedSitesButton = document.getElementById("clearAllowedSites");
 const statusElement = document.getElementById("status");
 
-let availableModels = [...DEFAULT_MODELS];
+const inputTypeCheckboxes = [
+  enableInputTextCheckbox,
+  enableInputSearchCheckbox,
+  enableInputEmailCheckbox,
+  enableInputUrlCheckbox,
+  enableInputTelCheckbox
+];
 
 initialize();
 
 async function initialize() {
-  populateModels();
-
   const stored = await chrome.storage.local.get([
-    "geminiApiKey",
-    "geminiModel",
     "dictationLanguage",
     "showVoiceButtons",
-    "onlyTextarea",
+    "enableTextarea",
+    "enabledInputTypes",
+    "customSelectors",
     "allowedSites"
   ]);
-
-  if (stored.geminiApiKey) {
-    apiKeyInput.value = stored.geminiApiKey;
-    await loadModels(stored.geminiModel);
-  } else if (stored.geminiModel) {
-    selectModel(stored.geminiModel);
-  }
 
   if (typeof stored.dictationLanguage === "string" && stored.dictationLanguage) {
     dictationLanguageSelect.value = stored.dictationLanguage;
@@ -53,41 +47,48 @@ async function initialize() {
     showVoiceButtonsCheckbox.checked = true;
   }
 
-  if (typeof stored.onlyTextarea === "boolean") {
-    onlyTextareaCheckbox.checked = stored.onlyTextarea;
+  if (typeof stored.enableTextarea === "boolean") {
+    enableTextareaCheckbox.checked = stored.enableTextarea;
   } else {
-    onlyTextareaCheckbox.checked = true;
+    enableTextareaCheckbox.checked = true;
+  }
+
+  const enabledTypes = Array.isArray(stored.enabledInputTypes) ? stored.enabledInputTypes : [];
+  for (const checkbox of inputTypeCheckboxes) {
+    if (checkbox && checkbox.value) {
+      checkbox.checked = enabledTypes.includes(checkbox.value);
+    }
+  }
+
+  if (typeof stored.customSelectors === "string") {
+    customSelectorsInput.value = stored.customSelectors;
   }
 
   if (typeof stored.allowedSites === "string") {
     allowedSitesInput.value = stored.allowedSites;
   }
 
-  saveTokenButton.addEventListener("click", handleSaveToken);
-  saveModelButton.addEventListener("click", handleSaveModel);
   saveDictationLanguageButton.addEventListener("click", handleSaveDictationLanguage);
+  saveCustomSelectorsButton.addEventListener("click", handleSaveCustomSelectors);
+  clearCustomSelectorsButton.addEventListener("click", handleClearCustomSelectors);
   saveAllowedSitesButton.addEventListener("click", handleSaveAllowedSites);
   clearAllowedSitesButton.addEventListener("click", handleClearAllowedSites);
   
   showVoiceButtonsCheckbox.addEventListener("change", handleToggleVoiceButtons);
-  onlyTextareaCheckbox.addEventListener("change", handleToggleOnlyTextarea);
-
-  apiKeyInput.addEventListener("change", () => {
-    setStatus("توکن تغییر کرد. برای ذخیره دکمه ذخیره را بزنید.");
-  });
-
-  modelSelect.addEventListener("change", () => {
-    setStatus("مدل تغییر کرد. برای ذخیره دکمه ذخیره را بزنید.");
-  });
+  enableTextareaCheckbox.addEventListener("change", handleToggleTextarea);
+  
+  for (const checkbox of inputTypeCheckboxes) {
+    checkbox.addEventListener("change", handleInputTypeChange);
+  }
 
   dictationLanguageSelect.addEventListener("change", () => {
     setStatus("زبان تغییر کرد. برای ذخیره دکمه ذخیره را بزنید.");
   });
 
-  systemRoleInput.addEventListener("input", () => {
-    const length = systemRoleInput.value.trim().length;
-    if (length > 0) {
-      setStatus(`${length} کاراکتر در نقش سیستم.`);
+  customSelectorsInput.addEventListener("input", () => {
+    const lines = countNonEmptyLines(customSelectorsInput.value);
+    if (lines > 0) {
+      setStatus(`${lines} سلکتور سفارشی.`);
     } else {
       setStatus("");
     }
@@ -103,74 +104,76 @@ async function initialize() {
   });
 }
 
-function populateModels() {
-  modelSelect.innerHTML = "";
-  for (const model of availableModels) {
-    const option = document.createElement("option");
-    option.value = model;
-    option.textContent = model.replace("models/", "");
-    modelSelect.append(option);
-  }
-}
-
-function selectModel(value) {
-  if (!value) {
-    return;
-  }
-  if ([...modelSelect.options].some((option) => option.value === value)) {
-    modelSelect.value = value;
-  }
-}
-
-async function handleSaveToken() {
-  const token = apiKeyInput.value.trim();
-  if (!token) {
-    setStatus("لطفا یک توکن معتبر وارد کنید.");
-    return;
-  }
-
-  await chrome.storage.local.set({ geminiApiKey: token });
-  setStatus("✅ توکن ذخیره شد.");
-  await loadModels(await getStoredModel());
-}
-
-async function handleSaveModel() {
-  const chosen = modelSelect.value;
-  if (!chosen) {
-    setStatus("لطفا ابتدا یک مدل انتخاب کنید.");
-    return;
-  }
-  await chrome.storage.local.set({ geminiModel: chosen });
-  setStatus(`✅ مدل ذخیره شد: ${chosen.replace("models/", "")}`);
-}
-
 async function handleSaveDictationLanguage() {
   const language = dictationLanguageSelect.value;
   await chrome.storage.local.set({ dictationLanguage: language });
-  const languageName = language === "fa-IR" ? "فارسی" : "انگلیسی";
+  const languageNames = {
+    "fa-IR": "فارسی",
+    "en-US": "انگلیسی",
+    "ar-SA": "عربی",
+    "es-ES": "اسپانیایی",
+    "fr-FR": "فرانسوی",
+    "de-DE": "آلمانی",
+    "tr-TR": "ترکی",
+    "ru-RU": "روسی",
+    "zh-CN": "چینی",
+    "ja-JP": "ژاپنی"
+  };
+  const languageName = languageNames[language] || language;
   setStatus(`✅ زبان ذخیره شد: ${languageName}`);
+  reloadAllTabs();
 }
 
 async function handleToggleVoiceButtons() {
   const isEnabled = showVoiceButtonsCheckbox.checked;
   await chrome.storage.local.set({ showVoiceButtons: isEnabled });
   setStatus(isEnabled ? "✅ دکمه‌های میکروفن فعال شدند." : "✅ دکمه‌های میکروفن غیرفعال شدند.");
-  
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs[0]?.id) {
-    chrome.tabs.reload(tabs[0].id);
-  }
+  reloadAllTabs();
 }
 
-async function handleToggleOnlyTextarea() {
-  const isEnabled = onlyTextareaCheckbox.checked;
-  await chrome.storage.local.set({ onlyTextarea: isEnabled });
-  setStatus(isEnabled ? "✅ فقط textarea فعال شد." : "✅ هم input و هم textarea فعال شد.");
-  
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs[0]?.id) {
-    chrome.tabs.reload(tabs[0].id);
+async function handleToggleTextarea() {
+  const isEnabled = enableTextareaCheckbox.checked;
+  await chrome.storage.local.set({ enableTextarea: isEnabled });
+  setStatus(isEnabled ? "✅ Textarea فعال شد." : "✅ Textarea غیرفعال شد.");
+  reloadAllTabs();
+}
+
+async function handleInputTypeChange() {
+  const enabledTypes = [];
+  for (const checkbox of inputTypeCheckboxes) {
+    if (checkbox && checkbox.checked && checkbox.value) {
+      enabledTypes.push(checkbox.value);
+    }
   }
+  
+  await chrome.storage.local.set({ enabledInputTypes: enabledTypes });
+  
+  if (enabledTypes.length > 0) {
+    setStatus(`✅ ${enabledTypes.length} نوع input فعال شد: ${enabledTypes.join(", ")}`);
+  } else {
+    setStatus("✅ هیچ input فعال نیست.");
+  }
+  
+  reloadAllTabs();
+}
+
+async function handleSaveCustomSelectors() {
+  const value = normalizeMultilineInput(customSelectorsInput.value);
+  await chrome.storage.local.set({ customSelectors: value });
+  const lines = countNonEmptyLines(value);
+  if (lines > 0) {
+    setStatus(`✅ ${lines} سلکتور سفارشی ذخیره شد.`);
+  } else {
+    setStatus("✅ لیست سلکتورها خالی شد.");
+  }
+  reloadAllTabs();
+}
+
+async function handleClearCustomSelectors() {
+  customSelectorsInput.value = "";
+  await chrome.storage.local.set({ customSelectors: "" });
+  setStatus("✅ سلکتورهای سفارشی پاک شدند.");
+  reloadAllTabs();
 }
 
 async function handleSaveAllowedSites() {
@@ -182,78 +185,27 @@ async function handleSaveAllowedSites() {
   } else {
     setStatus("✅ لیست خالی شد. (همه سایت‌ها فعال)");
   }
-  
-  const tabs = await chrome.tabs.query({});
-  for (const tab of tabs) {
-    if (tab.id) {
-      chrome.tabs.reload(tab.id);
-    }
-  }
+  reloadAllTabs();
 }
 
 async function handleClearAllowedSites() {
   allowedSitesInput.value = "";
   await chrome.storage.local.set({ allowedSites: "" });
   setStatus("✅ لیست پاک شد. همه سایت‌ها فعال شدند.");
-  
+  reloadAllTabs();
+}
+
+async function reloadAllTabs() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
-    if (tab.id) {
-      chrome.tabs.reload(tab.id);
+    if (tab.id && tab.url && !tab.url.startsWith("chrome://") && !tab.url.startsWith("edge://")) {
+      chrome.tabs.reload(tab.id).catch(() => {});
     }
   }
 }
 
-async function loadModels(preferredModel) {
-  const tokenPresent = apiKeyInput.value.trim();
-  if (!tokenPresent) {
-    availableModels = [...DEFAULT_MODELS];
-    populateModels();
-    selectModel(preferredModel || DEFAULT_MODELS[0]);
-    return;
-  }
-
-  setStatus("⏳ در حال بارگذاری مدل‌ها...");
-  modelSelect.disabled = true;
-
-  const response = await new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "listModels" }, (result) => {
-      if (chrome.runtime.lastError) {
-        resolve({ ok: false, error: chrome.runtime.lastError.message });
-        return;
-      }
-      resolve(result);
-    });
-  });
-
-  if (response?.ok && Array.isArray(response.models) && response.models.length > 0) {
-    availableModels = [...new Set(response.models)].sort();
-    populateModels();
-    const desired = preferredModel && availableModels.includes(preferredModel)
-      ? preferredModel
-      : availableModels[0];
-    modelSelect.value = desired;
-    setStatus("✅ مدل‌ها بارگذاری شدند. مدل خود را انتخاب و ذخیره کنید.");
-  } else {
-    availableModels = [...new Set([...availableModels])];
-    populateModels();
-    const desired = preferredModel && availableModels.includes(preferredModel)
-      ? preferredModel
-      : availableModels[0];
-    modelSelect.value = desired;
-    setStatus(response?.error || "❌ خطا در بارگذاری مدل‌ها، از مدل‌های پیش‌فرض استفاده می‌شود.");
-  }
-
-  modelSelect.disabled = false;
-}
-
 function setStatus(message) {
   statusElement.textContent = message;
-}
-
-async function getStoredModel() {
-  const { geminiModel } = await chrome.storage.local.get("geminiModel");
-  return geminiModel;
 }
 
 function normalizeMultilineInput(value) {
