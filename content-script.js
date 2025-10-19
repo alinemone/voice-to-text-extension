@@ -297,9 +297,15 @@ function teardownVoiceButton(element) {
   if (!buttons) {
     return;
   }
+  
   if (dictationSession?.element === element) {
     stopDictation(true);
   }
+  
+  if (iframeDictationSession?.element === element) {
+    stopIframeDictation(iframeDictationSession);
+  }
+  
   buttons.container.remove();
   buttonMap.delete(element);
 }
@@ -307,14 +313,32 @@ function teardownVoiceButton(element) {
 
 
 function toggleDictation(element, button) {
-  if (dictationSession?.element === element) {
-    stopDictation(true);
-    return;
+  const isInIframe = window !== window.top;
+  
+  if (isInIframe) {
+    if (iframeDictationSession?.element === element) {
+      stopIframeDictation(iframeDictationSession);
+      return;
+    }
+  } else {
+    if (dictationSession?.element === element) {
+      stopDictation(true);
+      return;
+    }
   }
+  
   startDictation(element, button);
 }
 
 function startDictation(element, button) {
+  const isInIframe = window !== window.top;
+  
+  if (isInIframe) {
+    console.log("📤 In iframe - delegating to top window");
+    startDictationInIframe(element, button);
+    return;
+  }
+  
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     notifyButton(button, "Speech recognition unsupported.");
@@ -970,3 +994,256 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   sendResponse({ ok: false, error: "Unsupported message." });
 });
+
+// ========== IFRAME SUPPORT ==========
+
+let iframeDictationSession = null;
+
+function startDictationInIframe(element, button) {
+  const requestId = `dictation_${Date.now()}_${Math.random()}`;
+  
+  const session = {
+    element,
+    button,
+    requestId,
+    baseText: getElementText(element),
+    active: true,
+    updatingText: false
+  };
+  
+  iframeDictationSession = session;
+  
+  button.classList.add(LISTENING_CLASS);
+  button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>`;
+  button.setAttribute("aria-label", "Stop recording");
+  button.title = "Stop recording";
+  
+  const messageHandler = (event) => {
+    if (event.data?.type === "DICTATION_RESULT" && event.data?.requestId === requestId) {
+      handleIframeDictationResult(session, event.data.text, event.data.isFinal);
+    } else if (event.data?.type === "DICTATION_STOPPED" && event.data?.requestId === requestId) {
+      stopIframeDictation(session);
+    } else if (event.data?.type === "DICTATION_ERROR" && event.data?.requestId === requestId) {
+      notifyButton(button, event.data.error || "Voice error");
+      stopIframeDictation(session);
+    }
+  };
+  
+  session.messageHandler = messageHandler;
+  window.addEventListener("message", messageHandler);
+  
+  const onUserInput = (event) => {
+    if (session.updatingText) {
+      return;
+    }
+    
+    if (event.type === "keydown" && event.key === "Enter") {
+      stopIframeDictation(session);
+    } else if (event.type === "input") {
+      stopIframeDictation(session);
+    }
+  };
+  
+  const onFocusLost = () => {
+    if (session.updatingText) {
+      return;
+    }
+    stopIframeDictation(session);
+  };
+  
+  session.onUserInput = onUserInput;
+  session.onFocusLost = onFocusLost;
+  
+  element.addEventListener("keydown", onUserInput);
+  element.addEventListener("input", onUserInput);
+  element.addEventListener("blur", onFocusLost);
+  
+  window.top.postMessage({
+    type: "START_DICTATION",
+    requestId: requestId,
+    lang: detectLanguage(element)
+  }, "*");
+}
+
+function handleIframeDictationResult(session, text, isFinal) {
+  if (!session.active || iframeDictationSession !== session) {
+    return;
+  }
+  
+  const combined = combineText(session.baseText, text, "");
+  
+  session.updatingText = true;
+  setElementText(session.element, combined);
+  setTimeout(() => {
+    if (session.updatingText) {
+      session.updatingText = false;
+    }
+  }, 100);
+  
+  if (isFinal) {
+    session.baseText = combined;
+  }
+}
+
+function stopIframeDictation(session) {
+  if (!session || !session.active) {
+    return;
+  }
+  
+  session.active = false;
+  
+  if (session.messageHandler) {
+    window.removeEventListener("message", session.messageHandler);
+  }
+  
+  if (session.onUserInput) {
+    session.element.removeEventListener("keydown", session.onUserInput);
+    session.element.removeEventListener("input", session.onUserInput);
+  }
+  
+  if (session.onFocusLost) {
+    session.element.removeEventListener("blur", session.onFocusLost);
+  }
+  
+  session.button.classList.remove(LISTENING_CLASS);
+  session.button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
+  session.button.setAttribute("aria-label", DEFAULT_TITLE);
+  session.button.title = DEFAULT_TITLE;
+  
+  window.top.postMessage({
+    type: "STOP_DICTATION",
+    requestId: session.requestId
+  }, "*");
+  
+  if (iframeDictationSession === session) {
+    iframeDictationSession = null;
+  }
+}
+
+// Top window listener for iframe dictation requests
+if (window === window.top) {
+  const topWindowDictationSessions = new Map();
+  
+  window.addEventListener("message", (event) => {
+    if (event.data?.type === "START_DICTATION") {
+      handleTopWindowDictationStart(event.data.requestId, event.data.lang, event.source);
+    } else if (event.data?.type === "STOP_DICTATION") {
+      handleTopWindowDictationStop(event.data.requestId);
+    }
+  });
+  
+  function handleTopWindowDictationStart(requestId, lang, sourceWindow) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      sourceWindow.postMessage({
+        type: "DICTATION_ERROR",
+        requestId: requestId,
+        error: "Speech recognition unsupported"
+      }, "*");
+      return;
+    }
+    
+    if (topWindowDictationSessions.has(requestId)) {
+      return;
+    }
+    
+    const recognition = new SpeechRecognition();
+    recognition.lang = lang || dictationLanguagePreference || "fa-IR";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    
+    let finalText = "";
+    
+    const session = {
+      recognition,
+      sourceWindow,
+      requestId,
+      finalText,
+      active: true
+    };
+    
+    topWindowDictationSessions.set(requestId, session);
+    
+    recognition.onresult = (event) => {
+      if (!session.active) return;
+      
+      let interim = "";
+      let finalAdded = session.finalText;
+      
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalAdded += result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
+      }
+      
+      session.finalText = applyVoiceCommands(finalAdded);
+      const interimProcessed = applyVoiceCommands(interim);
+      const combined = session.finalText + (interimProcessed ? " " + interimProcessed : "");
+      
+      sourceWindow.postMessage({
+        type: "DICTATION_RESULT",
+        requestId: requestId,
+        text: combined,
+        isFinal: false
+      }, "*");
+    };
+    
+    recognition.onerror = (event) => {
+      if (event.error === "no-speech" || event.error === "audio-capture") {
+        return;
+      }
+      sourceWindow.postMessage({
+        type: "DICTATION_ERROR",
+        requestId: requestId,
+        error: event.error
+      }, "*");
+      handleTopWindowDictationStop(requestId);
+    };
+    
+    recognition.onend = () => {
+      if (!session.active) return;
+      
+      try {
+        recognition.start();
+      } catch (error) {
+        handleTopWindowDictationStop(requestId);
+      }
+    };
+    
+    try {
+      recognition.start();
+    } catch (error) {
+      sourceWindow.postMessage({
+        type: "DICTATION_ERROR",
+        requestId: requestId,
+        error: error.message
+      }, "*");
+      topWindowDictationSessions.delete(requestId);
+    }
+  }
+  
+  function handleTopWindowDictationStop(requestId) {
+    const session = topWindowDictationSessions.get(requestId);
+    if (!session) {
+      return;
+    }
+    
+    session.active = false;
+    
+    try {
+      session.recognition.stop();
+    } catch (error) {
+      // ignore
+    }
+    
+    session.sourceWindow.postMessage({
+      type: "DICTATION_STOPPED",
+      requestId: requestId
+    }, "*");
+    
+    topWindowDictationSessions.delete(requestId);
+  }
+}
