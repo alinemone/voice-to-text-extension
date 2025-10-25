@@ -1,34 +1,28 @@
-const BUTTON_CONTAINER_CLASS = "gemini-voice-controls";
-const BUTTON_CLASS = "gemini-voice-dictation";
-const REMOVE_BUTTON_CLASS = "gemini-voice-remove";
-const LISTENING_CLASS = "gemini-voice-dictation--listening";
-const DEFAULT_TITLE = "Voice to Text";
-const REMOVE_TITLE = "Remove microphone button";
+// ==================== CONSTANTS ====================
+const BUTTON_CONTAINER_CLASS = "vtt-controls";
+const BUTTON_CLASS = "vtt-mic-button";
+const REMOVE_BUTTON_CLASS = "vtt-remove-button";
+const LISTENING_CLASS = "vtt-listening";
+const PROCESSING_CLASS = "vtt-processing";
+const ERROR_CLASS = "vtt-error";
 
-const buttonMap = new Map();
-let dictationSession = null;
-let mutationObserver;
-let dictationLanguagePreference = "fa-IR";
-let showVoiceButtons = true;
-let enableTextarea = true;
-let enabledInputTypes = [];
-let customSelectors = [];
-let allowedSites = [];
-let currentHostname = "";
-let cachedEditableSelector = "";
+const DEFAULT_TITLE = "شروع ضبط صدا (کلیک کنید)";
+const RECORDING_TITLE = "در حال ضبط... (کلیک برای توقف)";
+const PROCESSING_TITLE = "در حال پردازش...";
+const REMOVE_TITLE = "حذف دکمه میکروفون";
 
 const VOICE_COMMANDS = {
   "fa": {
+    "علامت سوال": "؟",
+    "علامت تعجب": "!",
+    "نقطه ویرگول": "؛",
     "نقطه": ".",
     "ویرگول": "،",
     "سوال": "؟",
-    "علامت سوال": "؟",
     "تعجب": "!",
-    "علامت تعجب": "!",
     "خط جدید": "\n",
     "اینتر": "\n",
     "دونقطه": ":",
-    "نقطه ویرگول": ";",
     "خط تیره": "-",
     "کروشه باز": "[",
     "کروشه بسته": "]",
@@ -38,12 +32,12 @@ const VOICE_COMMANDS = {
     "گیومه بسته": "»",
   },
   "en": {
+    "question mark": "?",
+    "exclamation mark": "!",
+    "exclamation point": "!",
     "period": ".",
     "dot": ".",
     "comma": ",",
-    "question mark": "?",
-    "exclamation": "!",
-    "exclamation mark": "!",
     "new line": "\n",
     "enter": "\n",
     "colon": ":",
@@ -58,1192 +52,999 @@ const VOICE_COMMANDS = {
   }
 };
 
+// ==================== STATE MANAGEMENT ====================
+const state = {
+  buttonMap: new Map(),
+  activeSession: null,
+  mutationObserver: null,
+  config: {
+    language: "fa-IR",
+    showButtons: true,
+    enableTextarea: true,
+    enabledInputTypes: [],
+    customSelectors: [],
+    allowedSites: [],
+  },
+  currentHostname: "",
+  cachedEditableSelector: "",
+};
+
 try {
-  currentHostname = window.location.hostname;
+  state.currentHostname = window.location.hostname;
 } catch (error) {
-  console.error("Could not get hostname:", error);
+  console.error("[VTT] Could not get hostname:", error);
 }
 
-chrome.storage?.local?.get([
-  "dictationLanguage",
-  "showVoiceButtons",
-  "enableTextarea",
-  "enabledInputTypes",
-  "customSelectors",
-  "allowedSites"
-], (stored) => {
-  console.log("🔧 Extension loaded on:", currentHostname);
-  console.log("📋 Settings:", stored);
-  
-  updateDictationLanguage(stored.dictationLanguage);
-  
-  if (typeof stored.showVoiceButtons === "boolean") {
-    showVoiceButtons = stored.showVoiceButtons;
-  }
-  
-  if (typeof stored.enableTextarea === "boolean") {
-    enableTextarea = stored.enableTextarea;
-  }
-  
-  if (Array.isArray(stored.enabledInputTypes)) {
-    enabledInputTypes = stored.enabledInputTypes;
-  }
-  
-  updateCustomSelectors(stored.customSelectors);
-  updateAllowedSites(stored.allowedSites);
-  buildEditableSelector();
-  
-  console.log("🔍 Loaded settings:", {
-    enableTextarea,
-    enabledInputTypes,
-    customSelectors,
-    cachedEditableSelector
-  });
-  
-  if (document.readyState !== "loading") {
-    refreshVoiceButtons();
-  } else {
-    document.addEventListener("DOMContentLoaded", () => refreshVoiceButtons(), { once: true });
-  }
-});
+// ==================== CONFIG MANAGER ====================
+class ConfigManager {
+  static async load() {
+    return new Promise((resolve) => {
+      chrome.storage?.local?.get([
+        "dictationLanguage",
+        "showVoiceButtons",
+        "enableTextarea",
+        "enabledInputTypes",
+        "customSelectors",
+        "allowedSites"
+      ], (stored) => {
+        state.config.language = stored.dictationLanguage || "fa-IR";
+        state.config.showButtons = stored.showVoiceButtons !== false;
+        state.config.enableTextarea = stored.enableTextarea !== false;
+        state.config.enabledInputTypes = Array.isArray(stored.enabledInputTypes) ? stored.enabledInputTypes : [];
+        state.config.customSelectors = this.parseMultiline(stored.customSelectors);
+        state.config.allowedSites = this.parseMultiline(stored.allowedSites);
 
-chrome.storage?.onChanged?.addListener((changes, area) => {
-  if (area !== "local") {
-    return;
-  }
-  
-  let needsRefresh = false;
-  let needsRebuild = false;
-  
-  if (Object.prototype.hasOwnProperty.call(changes, "dictationLanguage")) {
-    updateDictationLanguage(changes.dictationLanguage.newValue);
-  }
-  
-  if (Object.prototype.hasOwnProperty.call(changes, "showVoiceButtons")) {
-    showVoiceButtons = changes.showVoiceButtons.newValue;
-    needsRefresh = true;
-  }
-  
-  if (Object.prototype.hasOwnProperty.call(changes, "enableTextarea")) {
-    enableTextarea = changes.enableTextarea.newValue;
-    needsRebuild = true;
-    needsRefresh = true;
-  }
-  
-  if (Object.prototype.hasOwnProperty.call(changes, "enabledInputTypes")) {
-    enabledInputTypes = changes.enabledInputTypes.newValue;
-    needsRebuild = true;
-    needsRefresh = true;
-  }
-  
-  if (Object.prototype.hasOwnProperty.call(changes, "customSelectors")) {
-    updateCustomSelectors(changes.customSelectors.newValue);
-    needsRebuild = true;
-    needsRefresh = true;
-  }
-  
-  if (Object.prototype.hasOwnProperty.call(changes, "allowedSites")) {
-    updateAllowedSites(changes.allowedSites.newValue);
-    needsRefresh = true;
-  }
-  
-  if (needsRebuild) {
-    buildEditableSelector();
-  }
-  
-  if (needsRefresh) {
-    refreshVoiceButtons();
-  }
-});
+        this.buildEditableSelector();
 
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initializeVoiceDictation);
-} else {
-  initializeVoiceDictation();
-}
-
-function initializeVoiceDictation() {
-  addVoiceButtonStyles();
-  scanForEditables(document.body || document);
-  if (!mutationObserver) {
-    mutationObserver = new MutationObserver(handleMutations);
-    mutationObserver.observe(document.documentElement || document.body, {
-      childList: true,
-      subtree: true
+        console.log("[VTT] Config loaded:", state.config);
+        resolve();
+      });
     });
   }
-}
 
-function scanForEditables(root) {
-  if (!root) {
-    return;
+  static parseMultiline(value) {
+    if (typeof value !== "string" || !value.trim()) return [];
+    return value.split("\n").map(line => line.trim()).filter(line => line.length > 0);
   }
 
-  if (!showVoiceButtons || !isSiteAllowed() || !cachedEditableSelector) {
-    return;
-  }
+  static buildEditableSelector() {
+    const selectors = [];
 
-  if (root instanceof Element && isVoiceEligible(root)) {
-    attachVoiceButton(root);
-  }
-
-  const nodes = root.querySelectorAll?.(cachedEditableSelector) || [];
-  for (const node of nodes) {
-    if (isVoiceEligible(node)) {
-      attachVoiceButton(node);
-    }
-  }
-}
-
-function refreshVoiceButtons() {
-  if (!showVoiceButtons || !isSiteAllowed()) {
-    for (const [element] of [...buttonMap.entries()]) {
-      teardownVoiceButton(element);
-    }
-    return;
-  }
-
-  for (const [element] of [...buttonMap.entries()]) {
-    if (!isVoiceEligible(element)) {
-      teardownVoiceButton(element);
-    }
-  }
-
-  scanForEditables(document.body || document);
-}
-
-function handleMutations(mutations) {
-  for (const mutation of mutations) {
-    for (const node of mutation.addedNodes) {
-      if (node instanceof Element) {
-        scanForEditables(node);
-      }
+    if (state.config.enableTextarea) {
+      selectors.push("textarea");
     }
 
-    for (const node of mutation.removedNodes) {
-      if (node instanceof Element) {
-        removeVoiceButtons(node);
-      }
-    }
-  }
-}
-
-function attachVoiceButton(element) {
-  if (buttonMap.has(element) || !showVoiceButtons || !isSiteAllowed()) {
-    return;
-  }
-
-  const container = document.createElement("div");
-  container.className = BUTTON_CONTAINER_CLASS;
-
-  const micButton = document.createElement("button");
-  micButton.type = "button";
-  micButton.className = BUTTON_CLASS;
-  micButton.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
-  micButton.title = DEFAULT_TITLE;
-  micButton.setAttribute("aria-label", DEFAULT_TITLE);
-
-  const removeButton = document.createElement("button");
-  removeButton.type = "button";
-  removeButton.className = REMOVE_BUTTON_CLASS;
-  removeButton.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
-  removeButton.title = REMOVE_TITLE;
-  removeButton.setAttribute("aria-label", REMOVE_TITLE);
-
-  micButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    toggleDictation(element, micButton);
-  });
-
-  removeButton.addEventListener("click", (event) => {
-    console.log("Remove button event triggered");
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    if (dictationSession?.element === element) {
-      stopDictation(true);
-    }
-    teardownVoiceButton(element);
-  });
-
-  container.appendChild(micButton);
-  container.appendChild(removeButton);
-  element.insertAdjacentElement("afterend", container);
-  
-  buttonMap.set(element, { container, micButton, removeButton });
-  console.log("Voice buttons attached to element:", element.tagName, element.type || "textarea");
-}
-
-function removeVoiceButtons(root) {
-  if (buttonMap.has(root)) {
-    teardownVoiceButton(root);
-  }
-
-  if (!cachedEditableSelector) {
-    return;
-  }
-
-  const nodes = root.querySelectorAll?.(cachedEditableSelector) || [];
-  for (const node of nodes) {
-    if (buttonMap.has(node)) {
-      teardownVoiceButton(node);
-    }
-  }
-}
-
-function teardownVoiceButton(element) {
-  const buttons = buttonMap.get(element);
-  if (!buttons) {
-    return;
-  }
-  
-  if (dictationSession?.element === element) {
-    stopDictation(true);
-  }
-  
-  if (iframeDictationSession?.element === element) {
-    stopIframeDictation(iframeDictationSession);
-  }
-  
-  buttons.container.remove();
-  buttonMap.delete(element);
-}
-
-
-
-function toggleDictation(element, button) {
-  const isInIframe = window !== window.top;
-  
-  if (isInIframe) {
-    if (iframeDictationSession?.element === element) {
-      stopIframeDictation(iframeDictationSession);
-      return;
-    }
-  } else {
-    if (dictationSession?.element === element) {
-      stopDictation(true);
-      return;
-    }
-  }
-  
-  startDictation(element, button);
-}
-
-function startDictation(element, button) {
-  const isInIframe = window !== window.top;
-  
-  if (isInIframe) {
-    console.log("📤 In iframe - delegating to top window");
-    startDictationInIframe(element, button);
-    return;
-  }
-  
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    notifyButton(button, "Speech recognition unsupported.");
-    return;
-  }
-
-  if (dictationSession) {
-    stopDictation(true);
-  }
-
-  const recognition = new SpeechRecognition();
-  recognition.lang = detectLanguage(element);
-  recognition.interimResults = true;
-  recognition.continuous = true;
-
-  const onUserInput = (event) => {
-    if (session.updatingText) {
-      return;
-    }
-    
-    if (event.type === "keydown" && event.key === "Enter") {
-      console.log("⏹ User pressed Enter - stopping recording");
-      stopDictation(false);
-    } else if (event.type === "input") {
-      console.log("⏹ User started typing - stopping recording");
-      stopDictation(false);
-    }
-  };
-
-  const onFocusLost = () => {
-    console.log("⏹ Element lost focus - stopping recording");
-    stopDictation(false);
-  };
-
-  const session = {
-    element,
-    button,
-    recognition,
-    baseText: getElementText(element),
-    finalText: "",
-    interimText: "",
-    stoppedManually: false,
-    updatingText: false,
-    restartAttempts: 0,
-    onUserInput,
-    onFocusLost
-  };
-
-  dictationSession = session;
-
-  element.addEventListener("keydown", onUserInput);
-  element.addEventListener("input", onUserInput);
-  element.addEventListener("blur", onFocusLost);
-
-  recognition.onresult = (event) => handleDictationResult(session, event);
-  recognition.onerror = (event) => {
-    if (event.error === "no-speech" || event.error === "audio-capture") {
-      console.log("⚠️ Recognition error:", event.error, "- will retry");
-      return;
-    }
-    notifyButton(button, event.error || "Voice error");
-    stopDictation(true);
-  };
-  recognition.onend = () => handleRecognitionEnd(session);
-
-  try {
-    recognition.start();
-    element.focus({ preventScroll: false });
-    button.classList.add(LISTENING_CLASS);
-    button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>`;
-    button.setAttribute("aria-label", "Stop recording");
-    button.title = "Stop recording";
-  } catch (error) {
-    notifyButton(button, error.message || "Could not start recording.");
-    dictationSession = null;
-  }
-}
-
-function handleDictationResult(session, event) {
-  if (dictationSession !== session) {
-    return;
-  }
-
-  let interim = "";
-  let finalAdded = session.finalText;
-
-  for (let i = event.resultIndex; i < event.results.length; i += 1) {
-    const result = event.results[i];
-    if (result.isFinal) {
-      finalAdded += result[0].transcript;
-    } else {
-      interim += result[0].transcript;
-    }
-  }
-
-  session.finalText = applyVoiceCommands(finalAdded);
-  session.interimText = applyVoiceCommands(interim);
-
-  const combined = combineText(session.baseText, session.finalText, session.interimText);
-  
-  session.updatingText = true;
-  setElementText(session.element, combined);
-  setTimeout(() => {
-    if (session.updatingText) {
-      session.updatingText = false;
-    }
-  }, 100);
-}
-
-function handleRecognitionEnd(session) {
-  if (dictationSession !== session) {
-    return;
-  }
-
-  if (session.stoppedManually) {
-    finalizeDictation(session);
-    return;
-  }
-
-  console.log("🔄 Recognition ended, restarting for continuous recording...");
-  
-  const MAX_RESTART_ATTEMPTS = 50;
-  if (session.restartAttempts >= MAX_RESTART_ATTEMPTS) {
-    console.log("❌ Max restart attempts reached, stopping...");
-    finalizeDictation(session);
-    return;
-  }
-
-  session.restartAttempts += 1;
-  
-  // حفظ متن قبلی (هم final و هم interim) قبل از restart
-  const textToPreserve = session.finalText + (session.interimText || "");
-  if (textToPreserve) {
-    session.baseText = combineText(session.baseText, textToPreserve, "");
-    session.finalText = "";
-    session.interimText = "";
-    
-    // آپدیت فیلد با متن حفظ شده
-    session.updatingText = true;
-    setElementText(session.element, session.baseText);
-    setTimeout(() => {
-      if (session.updatingText) {
-        session.updatingText = false;
-      }
-    }, 100);
-    
-    console.log("📝 Preserved text before restart:", session.baseText);
-  }
-  
-  try {
-    session.recognition.start();
-  } catch (error) {
-    console.error("❌ Failed to restart recognition:", error);
-    if (error.name === "InvalidStateError") {
-      setTimeout(() => {
-        if (dictationSession === session && !session.stoppedManually) {
-          try {
-            session.recognition.start();
-          } catch (retryError) {
-            console.error("❌ Retry failed:", retryError);
-            finalizeDictation(session);
-          }
-        }
-      }, 100);
-    } else {
-      finalizeDictation(session);
-    }
-  }
-}
-
-function stopDictation(cancelled = false) {
-  if (!dictationSession) {
-    return;
-  }
-
-  dictationSession.stoppedManually = cancelled;
-
-  try {
-    dictationSession.recognition.stop();
-  } catch (error) {
-    finalizeDictation(dictationSession);
-  }
-}
-
-function finalizeDictation(session) {
-  if (dictationSession !== session) {
-    return;
-  }
-
-  const { element, button, baseText, finalText, onUserInput, onFocusLost } = session;
-  
-  if (onUserInput) {
-    element.removeEventListener("keydown", onUserInput);
-    element.removeEventListener("input", onUserInput);
-  }
-  if (onFocusLost) {
-    element.removeEventListener("blur", onFocusLost);
-  }
-
-  const completed = combineText(baseText, finalText, "");
-  setElementText(element, completed);
-
-  button.classList.remove(LISTENING_CLASS);
-  button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
-  button.setAttribute("aria-label", DEFAULT_TITLE);
-  button.title = DEFAULT_TITLE;
-
-  dictationSession = null;
-}
-
-function combineText(base, finalText, interimText) {
-  const addition = `${finalText || ""}${interimText || ""}`;
-  if (!addition) {
-    return base;
-  }
-
-  const trimmedBase = base ?? "";
-  const additionStartsWithNewline = addition.startsWith("\n");
-  const needsSpace = trimmedBase && !/\s$/.test(trimmedBase) && !additionStartsWithNewline;
-  return `${trimmedBase}${needsSpace ? " " : ""}${addition}`;
-}
-
-function detectLanguage(element) {
-  if (dictationLanguagePreference) {
-    return dictationLanguagePreference;
-  }
-
-  return (
-    element?.lang ||
-    element?.closest?.("[lang]")?.lang ||
-    document.documentElement.lang ||
-    navigator.language ||
-    "en-US"
-  );
-}
-
-function notifyButton(button, message) {
-  button.title = message;
-  button.setAttribute("aria-label", message);
-  button.classList.remove(LISTENING_CLASS);
-  button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
-  setTimeout(() => {
-    button.title = DEFAULT_TITLE;
-    button.setAttribute("aria-label", DEFAULT_TITLE);
-  }, 4000);
-}
-
-function getElementText(element) {
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-    return element.value;
-  }
-  if (isContentEditable(element)) {
-    return element.textContent || "";
-  }
-  return "";
-}
-
-function setElementText(element, text) {
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-    element.value = text;
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    const caret = text.length;
-    try {
-      element.setSelectionRange(caret, caret);
-    } catch (error) {
-      /* ignore unsupported types */
-    }
-    return;
-  }
-
-  if (isContentEditable(element)) {
-    element.textContent = text;
-    const selection = window.getSelection();
-    if (selection) {
-      selection.removeAllRanges();
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      range.collapse(false);
-      selection.addRange(range);
-    }
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-}
-
-function addVoiceButtonStyles() {
-  if (document.getElementById("gemini-voice-style")) {
-    return;
-  }
-  const style = document.createElement("style");
-  style.id = "gemini-voice-style";
-  style.textContent = `
-    .${BUTTON_CONTAINER_CLASS} {
-      display: inline-flex !important;
-      gap: 4px !important;
-      margin-left: 6px !important;
-      vertical-align: top !important;
-      position: relative !important;
-      z-index: 2147483647 !important;
-      pointer-events: auto !important;
-      opacity: 1 !important;
-      visibility: visible !important;
-      flex-shrink: 0 !important;
-      align-items: flex-start !important;
-    }
-    
-    .${BUTTON_CLASS},
-    .${REMOVE_BUTTON_CLASS} {
-      padding: 6px !important;
-      border: none !important;
-      border-radius: 8px !important;
-      cursor: pointer !important;
-      display: inline-flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      line-height: 1 !important;
-      vertical-align: top !important;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.08) !important;
-      position: relative !important;
-      overflow: hidden !important;
-      pointer-events: auto !important;
-      user-select: none !important;
-      -webkit-user-select: none !important;
-      opacity: 1 !important;
-      visibility: visible !important;
-      flex-shrink: 0 !important;
-      width: 32px !important;
-      height: 32px !important;
-    }
-    
-    .${BUTTON_CLASS} {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-      color: #ffffff !important;
-    }
-    
-    .${BUTTON_CLASS}:hover {
-      transform: translateY(-1px) !important;
-      box-shadow: 0 4px 6px rgba(102, 126, 234, 0.4), 0 2px 4px rgba(118, 75, 162, 0.3) !important;
-    }
-    
-    .${BUTTON_CLASS}:active {
-      transform: translateY(0) !important;
-    }
-    
-    .${BUTTON_CLASS}.${LISTENING_CLASS} {
-      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
-      animation: pulse 1.5s ease-in-out infinite !important;
-    }
-    
-    .${REMOVE_BUTTON_CLASS} {
-      background: linear-gradient(135deg, #64748b 0%, #475569 100%) !important;
-      color: #ffffff !important;
-      width: 28px !important;
-    }
-    
-    .${REMOVE_BUTTON_CLASS}:hover {
-      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
-      transform: translateY(-1px) !important;
-      box-shadow: 0 4px 6px rgba(239, 68, 68, 0.4) !important;
-    }
-    
-    .${REMOVE_BUTTON_CLASS}:active {
-      transform: translateY(0) !important;
-    }
-    
-    @keyframes pulse {
-      0%, 100% {
-        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
-      }
-      50% {
-        box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
-      }
-    }
-    
-    .${BUTTON_CLASS} svg,
-    .${REMOVE_BUTTON_CLASS} svg {
-      display: block !important;
-      pointer-events: none !important;
-      width: 16px !important;
-      height: 16px !important;
-      flex-shrink: 0 !important;
-    }
-    
-    .${REMOVE_BUTTON_CLASS} svg {
-      width: 14px !important;
-      height: 14px !important;
-    }
-  `;
-  (document.head || document.documentElement || document.body || document).appendChild(style);
-}
-
-function isVoiceEligible(element) {
-  if (!(element instanceof HTMLElement)) {
-    return false;
-  }
-  
-  if (element.dataset.geminiVoiceIgnore === "true") {
-    return false;
-  }
-  
-  if (element instanceof HTMLTextAreaElement && enableTextarea) {
-    return true;
-  }
-  
-  if (element instanceof HTMLInputElement) {
-    const inputType = element.type || "text";
-    if (enabledInputTypes.includes(inputType)) {
-      return true;
-    }
-  }
-  
-  if (customSelectors.length > 0) {
-    for (const selector of customSelectors) {
-      try {
-        if (element.matches(selector)) {
-          if (element instanceof HTMLInputElement || 
-              element instanceof HTMLTextAreaElement || 
-              isContentEditable(element)) {
-            return true;
-          }
-          console.warn(`Element matches selector "${selector}" but is not editable:`, element);
-        }
-      } catch (e) {
-        console.warn("Invalid selector:", selector, e);
-      }
-    }
-  }
-  
-  return false;
-}
-
-function updateDictationLanguage(value) {
-  if (typeof value === "string" && value.trim()) {
-    dictationLanguagePreference = value.trim();
-  } else {
-    dictationLanguagePreference = "fa-IR";
-  }
-}
-
-function updateCustomSelectors(value) {
-  if (typeof value !== "string" || !value.trim()) {
-    customSelectors = [];
-    return;
-  }
-  
-  customSelectors = value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  
-  console.log("Custom selectors updated:", customSelectors);
-}
-
-function buildEditableSelector() {
-  const selectors = [];
-  
-  if (enableTextarea) {
-    selectors.push("textarea");
-  }
-  
-  if (enabledInputTypes.length > 0) {
-    for (const type of enabledInputTypes) {
+    for (const type of state.config.enabledInputTypes) {
       selectors.push(`input[type='${type}']`);
     }
-  }
-  
-  if (customSelectors.length > 0) {
-    selectors.push(...customSelectors);
-  }
-  
-  cachedEditableSelector = selectors.join(", ");
-  console.log("Built selector:", cachedEditableSelector);
-}
 
-function applyVoiceCommands(text) {
-  if (!text) {
-    return text;
+    selectors.push(...state.config.customSelectors);
+
+    state.cachedEditableSelector = selectors.join(", ");
+    console.log("[VTT] Editable selector:", state.cachedEditableSelector);
   }
 
-  const lang = dictationLanguagePreference.startsWith("fa") ? "fa" : "en";
-  const commands = VOICE_COMMANDS[lang] || {};
-  
-  let result = text;
-  
-  for (const [command, replacement] of Object.entries(commands)) {
-    const regex = new RegExp(`\\b${command}\\b`, "gi");
-    result = result.replace(regex, replacement);
-  }
-  
-  return result;
-}
+  static isSiteAllowed() {
+    if (state.config.allowedSites.length === 0) return true;
+    if (!state.currentHostname) return false;
 
-function updateAllowedSites(value) {
-  if (typeof value !== "string" || !value.trim()) {
-    allowedSites = [];
-    return;
+    const hostname = state.currentHostname.toLowerCase();
+    return state.config.allowedSites.some(pattern => this.matchDomain(hostname, pattern));
   }
-  
-  allowedSites = value
-    .split("\n")
-    .map((line) => line.trim().toLowerCase())
-    .filter((line) => line.length > 0);
-  
-  console.log("Allowed sites updated:", allowedSites);
-}
 
-function isSiteAllowed() {
-  if (allowedSites.length === 0) {
-    console.log("✅ Whitelist empty - all sites allowed");
-    return true;
-  }
-  
-  if (!currentHostname) {
-    console.log("❌ No hostname detected");
+  static matchDomain(hostname, pattern) {
+    pattern = pattern.toLowerCase();
+    if (pattern === hostname) return true;
+    if (pattern.startsWith("*.")) {
+      const domain = pattern.slice(2);
+      return hostname === domain || hostname.endsWith("." + domain);
+    }
+    if (pattern.startsWith("*")) {
+      return hostname.endsWith(pattern.slice(1));
+    }
     return false;
   }
-  
-  const hostname = currentHostname.toLowerCase();
-  console.log(`🔍 Checking site: ${hostname} against whitelist:`, allowedSites);
-  
-  for (const pattern of allowedSites) {
-    if (matchDomain(hostname, pattern)) {
-      console.log(`✅ Site allowed: ${hostname} matches ${pattern}`);
-      return true;
+}
+
+// ==================== TEXT MANAGER ====================
+class TextManager {
+  static combineText(base, finalText, interimText) {
+    const addition = `${finalText || ""}${interimText || ""}`;
+    if (!addition) return base;
+
+    const trimmedBase = base ?? "";
+    if (!trimmedBase) return addition;
+
+    // Check if addition starts with newline
+    if (addition.startsWith("\n")) {
+      return trimmedBase + addition;
     }
-  }
-  
-  console.log(`❌ Site not allowed: ${hostname} (whitelist active with ${allowedSites.length} entries)`);
-  return false;
-}
 
-function matchDomain(hostname, pattern) {
-  if (pattern === hostname) {
-    return true;
-  }
-  
-  if (pattern.startsWith("*.")) {
-    const domain = pattern.slice(2);
-    if (hostname === domain) {
-      return true;
+    // Check if addition starts with punctuation (no space needed)
+    if (/^[.،؛:!؟?\-\]\)»"']/.test(addition)) {
+      return trimmedBase + addition;
     }
-    if (hostname.endsWith("." + domain)) {
-      return true;
+
+    // Check if base ends with space or newline
+    if (/[\s\n]$/.test(trimmedBase)) {
+      return trimmedBase + addition;
     }
+
+    // Otherwise add space
+    return trimmedBase + " " + addition;
   }
-  
-  if (pattern.startsWith("*")) {
-    const domain = pattern.slice(1);
-    if (hostname.endsWith(domain)) {
-      return true;
+
+  static getElementText(element) {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      return element.value;
     }
-  }
-  
-  return false;
-}
-
-function insertTextIntoActiveElement(text) {
-  const active = document.activeElement;
-  if (!active) {
-    return { ok: false, error: "No active element." };
-  }
-
-  if (isStandardInput(active)) {
-    insertIntoInput(active, text);
-    return { ok: true };
-  }
-
-  if (isContentEditable(active)) {
-    insertIntoContentEditable(active, text);
-    return { ok: true };
-  }
-
-  const editable = findClosestEditable(active);
-  if (editable) {
-    if (isStandardInput(editable)) {
-      insertIntoInput(editable, text);
-    } else {
-      insertIntoContentEditable(editable, text);
+    if (this.isContentEditable(element)) {
+      return element.textContent || "";
     }
-    return { ok: true };
+    return "";
   }
 
-  return { ok: false, error: "Active element is not editable." };
-}
+  static setElementText(element, text) {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      if (element.value !== text) {
+        element.value = text;
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }
 
-function isStandardInput(element) {
-  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
-    return false;
-  }
-
-  if (element instanceof HTMLInputElement) {
-    const allowedTypes = new Set([
-      "text",
-      "search",
-      "email",
-      "url",
-      "tel",
-      "password"
-    ]);
-    return allowedTypes.has(element.type) || element.type === "";
-  }
-
-  return true;
-}
-
-function isContentEditable(element) {
-  return element instanceof HTMLElement && element.isContentEditable;
-}
-
-function insertIntoInput(element, text) {
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? element.value.length;
-  const value = element.value;
-  const nextValue = `${value.slice(0, start)}${text}${value.slice(end)}`;
-  element.value = nextValue;
-  element.dispatchEvent(new Event("input", { bubbles: true }));
-  const position = start + text.length;
-  element.setSelectionRange(position, position);
-}
-
-function insertIntoContentEditable(element, text) {
-  const selection = window.getSelection();
-  if (!selection) {
-    return;
-  }
-
-  if (selection.rangeCount === 0) {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.collapse(false);
-    selection.addRange(range);
-  }
-
-  const range = selection.getRangeAt(0);
-  range.deleteContents();
-  const textNode = document.createTextNode(text);
-  range.insertNode(textNode);
-  range.setStartAfter(textNode);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
-function findClosestEditable(element) {
-  return element.closest?.("input, textarea, [contenteditable=''], [contenteditable='true'], [contenteditable='plaintext-only']");
-}
-
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "insertText" && typeof message.text === "string") {
-    const result = insertTextIntoActiveElement(message.text);
-    sendResponse(result);
-    return;
-  }
-  sendResponse({ ok: false, error: "Unsupported message." });
-});
-
-// ========== IFRAME SUPPORT ==========
-
-let iframeDictationSession = null;
-
-function startDictationInIframe(element, button) {
-  const requestId = `dictation_${Date.now()}_${Math.random()}`;
-  
-  const session = {
-    element,
-    button,
-    requestId,
-    baseText: getElementText(element),
-    active: true,
-    updatingText: false
-  };
-  
-  iframeDictationSession = session;
-  
-  button.classList.add(LISTENING_CLASS);
-  button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>`;
-  button.setAttribute("aria-label", "Stop recording");
-  button.title = "Stop recording";
-  
-  const messageHandler = (event) => {
-    if (event.data?.type === "DICTATION_RESULT" && event.data?.requestId === requestId) {
-      handleIframeDictationResult(session, event.data.text, event.data.isFinal);
-    } else if (event.data?.type === "DICTATION_STOPPED" && event.data?.requestId === requestId) {
-      stopIframeDictation(session);
-    } else if (event.data?.type === "DICTATION_ERROR" && event.data?.requestId === requestId) {
-      notifyButton(button, event.data.error || "Voice error");
-      stopIframeDictation(session);
-    }
-  };
-  
-  session.messageHandler = messageHandler;
-  window.addEventListener("message", messageHandler);
-  
-  const onUserInput = (event) => {
-    if (session.updatingText) {
+      const caret = text.length;
+      try {
+        if (element.selectionStart !== caret || element.selectionEnd !== caret) {
+          element.setSelectionRange(caret, caret);
+        }
+      } catch (error) {
+        // Ignore unsupported input types
+      }
       return;
     }
-    
-    if (event.type === "keydown" && event.key === "Enter") {
-      stopIframeDictation(session);
-    } else if (event.type === "input") {
-      stopIframeDictation(session);
-    }
-  };
-  
-  const onFocusLost = () => {
-    if (session.updatingText) {
-      return;
-    }
-    stopIframeDictation(session);
-  };
-  
-  session.onUserInput = onUserInput;
-  session.onFocusLost = onFocusLost;
-  
-  element.addEventListener("keydown", onUserInput);
-  element.addEventListener("input", onUserInput);
-  element.addEventListener("blur", onFocusLost);
-  
-  window.top.postMessage({
-    type: "START_DICTATION",
-    requestId: requestId,
-    lang: detectLanguage(element)
-  }, "*");
-}
 
-function handleIframeDictationResult(session, text, isFinal) {
-  if (!session.active || iframeDictationSession !== session) {
-    return;
-  }
-  
-  const combined = combineText(session.baseText, text, "");
-  
-  session.updatingText = true;
-  setElementText(session.element, combined);
-  setTimeout(() => {
-    if (session.updatingText) {
-      session.updatingText = false;
+    if (this.isContentEditable(element)) {
+      if (element.textContent !== text) {
+        element.textContent = text;
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.addRange(range);
+      }
     }
-  }, 100);
-  
-  if (isFinal) {
-    session.baseText = combined;
+  }
+
+  static isContentEditable(element) {
+    return element instanceof HTMLElement && element.isContentEditable;
   }
 }
 
-function stopIframeDictation(session) {
-  if (!session || !session.active) {
-    return;
+// ==================== VOICE COMMAND PROCESSOR ====================
+class VoiceCommandProcessor {
+  static process(text) {
+    if (!text) return text;
+
+    const lang = state.config.language.startsWith("fa") ? "fa" : "en";
+    const commands = VOICE_COMMANDS[lang] || {};
+
+    let result = text;
+    const sortedCommands = Object.entries(commands).sort((a, b) => b[0].length - a[0].length);
+
+    for (const [command, replacement] of sortedCommands) {
+      if (lang === "fa") {
+        const regex = new RegExp(`(^|\\s)(${this.escapeRegex(command)})(\\s|$)`, "gi");
+        result = result.replace(regex, (match, before, cmd, after) => {
+          return before + replacement + after;
+        });
+      } else {
+        const regex = new RegExp(`\\b${this.escapeRegex(command)}\\b`, "gi");
+        result = result.replace(regex, replacement);
+      }
+    }
+
+    return result;
   }
-  
-  session.active = false;
-  
-  if (session.messageHandler) {
-    window.removeEventListener("message", session.messageHandler);
-  }
-  
-  if (session.onUserInput) {
-    session.element.removeEventListener("keydown", session.onUserInput);
-    session.element.removeEventListener("input", session.onUserInput);
-  }
-  
-  if (session.onFocusLost) {
-    session.element.removeEventListener("blur", session.onFocusLost);
-  }
-  
-  session.button.classList.remove(LISTENING_CLASS);
-  session.button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
-  session.button.setAttribute("aria-label", DEFAULT_TITLE);
-  session.button.title = DEFAULT_TITLE;
-  
-  window.top.postMessage({
-    type: "STOP_DICTATION",
-    requestId: session.requestId
-  }, "*");
-  
-  if (iframeDictationSession === session) {
-    iframeDictationSession = null;
+
+  static escapeRegex(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 }
 
-// Top window listener for iframe dictation requests
-if (window === window.top) {
-  const topWindowDictationSessions = new Map();
-  
-  window.addEventListener("message", (event) => {
-    if (event.data?.type === "START_DICTATION") {
-      handleTopWindowDictationStart(event.data.requestId, event.data.lang, event.source);
-    } else if (event.data?.type === "STOP_DICTATION") {
-      handleTopWindowDictationStop(event.data.requestId);
-    }
-  });
-  
-  function handleTopWindowDictationStart(requestId, lang, sourceWindow) {
+// ==================== VOICE RECOGNITION MANAGER ====================
+class VoiceRecognitionManager {
+  constructor(element, button) {
+    this.element = element;
+    this.button = button;
+    this.recognition = null;
+    this.isActive = false;
+    this.isPaused = false;
+
+    // Text state - simplified approach
+    this.accumulatedText = TextManager.getElementText(element); // All finalized text
+    this.currentInterim = ""; // Current interim result
+
+    this.restartAttempts = 0;
+    this.maxRestarts = 50;
+
+    this.updateTimer = null;
+    this.restartTimer = null;
+
+    this.setupRecognition();
+    this.setupEventListeners();
+  }
+
+  setupRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      sourceWindow.postMessage({
-        type: "DICTATION_ERROR",
-        requestId: requestId,
-        error: "Speech recognition unsupported"
-      }, "*");
-      return;
+      throw new Error("Speech recognition not supported");
     }
-    
-    if (topWindowDictationSessions.has(requestId)) {
-      return;
-    }
-    
-    const recognition = new SpeechRecognition();
-    recognition.lang = lang || dictationLanguagePreference || "fa-IR";
-    recognition.interimResults = true;
-    recognition.continuous = true;
-    
-    let finalText = "";
-    
-    const session = {
-      recognition,
-      sourceWindow,
-      requestId,
-      finalText,
-      active: true
-    };
-    
-    topWindowDictationSessions.set(requestId, session);
-    
-    recognition.onresult = (event) => {
-      if (!session.active) return;
-      
-      let interim = "";
-      let finalAdded = session.finalText;
-      
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) {
-          finalAdded += result[0].transcript;
-        } else {
-          interim += result[0].transcript;
-        }
-      }
-      
-      session.finalText = applyVoiceCommands(finalAdded);
-      const interimProcessed = applyVoiceCommands(interim);
-      const combined = session.finalText + (interimProcessed ? " " + interimProcessed : "");
-      
-      sourceWindow.postMessage({
-        type: "DICTATION_RESULT",
-        requestId: requestId,
-        text: combined,
-        isFinal: false
-      }, "*");
-    };
-    
-    recognition.onerror = (event) => {
-      if (event.error === "no-speech" || event.error === "audio-capture") {
+
+    this.recognition = new SpeechRecognition();
+    this.recognition.lang = state.config.language;
+    this.recognition.interimResults = true;
+    this.recognition.continuous = true;
+    this.recognition.maxAlternatives = 1;
+
+    this.recognition.onstart = () => this.handleStart();
+    this.recognition.onresult = (event) => this.handleResult(event);
+    this.recognition.onerror = (event) => this.handleError(event);
+    this.recognition.onend = () => this.handleEnd();
+  }
+
+  setupEventListeners() {
+    // Track last programmatic update to avoid false positives
+    this.lastProgrammaticUpdate = 0;
+
+    this.onUserInput = (event) => {
+      if (this.isPaused) return;
+
+      // Ignore all non-trusted events (programmatic)
+      if (!event.isTrusted) return;
+
+      const now = Date.now();
+
+      // If we just updated programmatically (within 500ms), ignore input events
+      // This prevents false detection when voice commands add newlines
+      if (event.type === "input" && (now - this.lastProgrammaticUpdate) < 500) {
+        console.log("[VTT] Ignoring input event - recent programmatic update");
         return;
       }
-      sourceWindow.postMessage({
-        type: "DICTATION_ERROR",
-        requestId: requestId,
-        error: event.error
-      }, "*");
-      handleTopWindowDictationStop(requestId);
-    };
-    
-    recognition.onend = () => {
-      if (!session.active) return;
-      
-      try {
-        recognition.start();
-      } catch (error) {
-        handleTopWindowDictationStop(requestId);
+
+      if (event.type === "keydown" && event.key === "Enter" && !event.shiftKey) {
+        console.log("[VTT] User pressed Enter - stopping recording");
+        this.stop();
+      } else if (event.type === "input") {
+        // Get current text to compare
+        const currentText = TextManager.getElementText(this.element);
+        const expectedText = TextManager.combineText(this.accumulatedText, "", this.currentInterim);
+
+        // Only stop if user actually typed something different
+        if (currentText !== expectedText) {
+          console.log("[VTT] User typed - stopping recording");
+          this.stop();
+        }
       }
     };
-    
+
+    this.onFocusLost = () => {
+      if (!this.isPaused) {
+        console.log("[VTT] Element lost focus - stopping recording");
+        this.stop();
+      }
+    };
+  }
+
+  start() {
+    if (this.isActive) return;
+
     try {
-      recognition.start();
+      this.isActive = true;
+      this.restartAttempts = 0;
+
+      // Get current text as base
+      this.accumulatedText = TextManager.getElementText(this.element);
+      this.currentInterim = "";
+
+      this.recognition.start();
+      this.element.focus({ preventScroll: true });
+
+      // Attach event listeners
+      this.element.addEventListener("keydown", this.onUserInput);
+      this.element.addEventListener("input", this.onUserInput);
+      this.element.addEventListener("blur", this.onFocusLost);
+
+      UIManager.setButtonState(this.button, "recording");
+
+      console.log("[VTT] Recording started. Base text length:", this.accumulatedText.length);
     } catch (error) {
-      sourceWindow.postMessage({
-        type: "DICTATION_ERROR",
-        requestId: requestId,
-        error: error.message
-      }, "*");
-      topWindowDictationSessions.delete(requestId);
+      console.error("[VTT] Failed to start recording:", error);
+      UIManager.showError(this.button, "خطا در شروع ضبط");
+      this.cleanup();
     }
   }
-  
-  function handleTopWindowDictationStop(requestId) {
-    const session = topWindowDictationSessions.get(requestId);
-    if (!session) {
+
+  stop() {
+    if (!this.isActive) return;
+
+    console.log("[VTT] Stopping recording...");
+    this.isActive = false;
+
+    try {
+      this.recognition.stop();
+    } catch (error) {
+      console.error("[VTT] Error stopping recognition:", error);
+    }
+
+    // Don't call cleanup here - let onend handle it
+  }
+
+  handleStart() {
+    console.log("[VTT] Recognition started");
+    UIManager.setButtonState(this.button, "recording");
+  }
+
+  handleResult(event) {
+    if (!this.isActive) return;
+
+    let finalText = "";
+    let interimText = "";
+    let hasFinal = false;
+
+    // Process all results
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i];
+      const transcript = result[0].transcript;
+
+      if (result.isFinal) {
+        finalText += transcript;
+        hasFinal = true;
+      } else {
+        interimText += transcript;
+      }
+    }
+
+    // Apply voice commands
+    if (finalText) {
+      finalText = VoiceCommandProcessor.process(finalText);
+    }
+    if (interimText) {
+      interimText = VoiceCommandProcessor.process(interimText);
+    }
+
+    // Update accumulated text with finalized results
+    if (hasFinal && finalText) {
+      this.accumulatedText = TextManager.combineText(this.accumulatedText, finalText, "");
+      console.log("[VTT] Final text added. Total length:", this.accumulatedText.length);
+    }
+
+    // Update current interim
+    this.currentInterim = interimText;
+
+    // Update UI
+    this.updateElementText(hasFinal);
+  }
+
+  updateElementText(isImmediate = false) {
+    // Clear any pending timer
+    if (this.updateTimer) {
+      clearTimeout(this.updateTimer);
+      this.updateTimer = null;
+    }
+
+    const updateFn = () => {
+      this.isPaused = true;
+
+      const fullText = TextManager.combineText(this.accumulatedText, "", this.currentInterim);
+
+      // Mark the timestamp before updating
+      this.lastProgrammaticUpdate = Date.now();
+      TextManager.setElementText(this.element, fullText);
+
+      // Resume after a short delay
+      setTimeout(() => {
+        this.isPaused = false;
+      }, 150);
+    };
+
+    if (isImmediate) {
+      // Immediate update for final results
+      updateFn();
+    } else {
+      // Debounced update for interim results
+      this.updateTimer = setTimeout(updateFn, 100);
+    }
+  }
+
+  handleError(event) {
+    console.error("[VTT] Recognition error:", event.error);
+
+    // Don't stop on recoverable errors
+    if (event.error === "no-speech" || event.error === "audio-capture") {
       return;
     }
-    
-    session.active = false;
-    
-    try {
-      session.recognition.stop();
-    } catch (error) {
-      // ignore
+
+    if (event.error === "aborted") {
+      // Normal abort, just cleanup
+      this.cleanup();
+      return;
     }
-    
-    session.sourceWindow.postMessage({
-      type: "DICTATION_STOPPED",
-      requestId: requestId
-    }, "*");
-    
-    topWindowDictationSessions.delete(requestId);
+
+    UIManager.showError(this.button, `خطا: ${event.error}`);
+    this.cleanup();
+  }
+
+  handleEnd() {
+    console.log("[VTT] Recognition ended. Active:", this.isActive, "Restart attempts:", this.restartAttempts);
+
+    if (!this.isActive) {
+      // User stopped it manually
+      this.cleanup();
+      return;
+    }
+
+    // Auto restart for continuous recording
+    if (this.restartAttempts >= this.maxRestarts) {
+      console.log("[VTT] Max restart attempts reached");
+      this.cleanup();
+      return;
+    }
+
+    this.restartAttempts++;
+
+    // Reset interim text before restart
+    this.currentInterim = "";
+
+    // Restart with a small delay
+    this.restartTimer = setTimeout(() => {
+      if (this.isActive) {
+        try {
+          this.recognition.start();
+          console.log("[VTT] Recognition restarted. Attempt:", this.restartAttempts);
+        } catch (error) {
+          console.error("[VTT] Failed to restart:", error);
+          this.cleanup();
+        }
+      }
+    }, 100);
+  }
+
+  cleanup() {
+    console.log("[VTT] Cleaning up session");
+
+    this.isActive = false;
+    this.isPaused = false;
+
+    // Clear timers
+    if (this.updateTimer) {
+      clearTimeout(this.updateTimer);
+      this.updateTimer = null;
+    }
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+
+    // Remove event listeners
+    this.element.removeEventListener("keydown", this.onUserInput);
+    this.element.removeEventListener("input", this.onUserInput);
+    this.element.removeEventListener("blur", this.onFocusLost);
+
+    // Set final text - include any remaining interim text
+    // This ensures we don't lose text that hasn't been finalized yet
+    let finalText = this.accumulatedText;
+    if (this.currentInterim) {
+      finalText = TextManager.combineText(finalText, this.currentInterim, "");
+      console.log("[VTT] Including interim text in final output:", this.currentInterim);
+    }
+
+    // Mark timestamp before final update
+    this.lastProgrammaticUpdate = Date.now();
+    TextManager.setElementText(this.element, finalText);
+
+    // Reset UI
+    UIManager.setButtonState(this.button, "idle");
+
+    // Clear from state
+    if (state.activeSession === this) {
+      state.activeSession = null;
+    }
+
+    console.log("[VTT] Session cleaned up. Final text length:", finalText.length);
   }
 }
+
+// ==================== UI MANAGER ====================
+class UIManager {
+  static initialize() {
+    this.addStyles();
+  }
+
+  static addStyles() {
+    if (document.getElementById("vtt-styles")) return;
+
+    const style = document.createElement("style");
+    style.id = "vtt-styles";
+    style.textContent = `
+      .${BUTTON_CONTAINER_CLASS} {
+        display: inline-flex !important;
+        gap: 6px !important;
+        margin-left: 8px !important;
+        vertical-align: middle !important;
+        position: relative !important;
+        z-index: 2147483647 !important;
+        pointer-events: auto !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        flex-shrink: 0 !important;
+        align-items: center !important;
+      }
+
+      .${BUTTON_CLASS},
+      .${REMOVE_BUTTON_CLASS} {
+        padding: 8px !important;
+        border: 2px solid transparent !important;
+        border-radius: 50% !important;
+        cursor: pointer !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1) !important;
+        position: relative !important;
+        overflow: hidden !important;
+        pointer-events: auto !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        flex-shrink: 0 !important;
+        width: 36px !important;
+        height: 36px !important;
+        background: #ffffff !important;
+      }
+
+      .${BUTTON_CLASS} {
+        background: #2563eb !important;
+        color: #ffffff !important;
+        border-color: #1d4ed8 !important;
+      }
+
+      .${BUTTON_CLASS}:hover {
+        background: #1d4ed8 !important;
+        box-shadow: 0 4px 10px rgba(37, 99, 235, 0.3) !important;
+      }
+
+      .${BUTTON_CLASS}:active {
+        transform: scale(0.95) !important;
+      }
+
+      .${BUTTON_CLASS}.${LISTENING_CLASS} {
+        background: #dc2626 !important;
+        border-color: #b91c1c !important;
+        animation: vtt-pulse 2s ease-in-out infinite !important;
+      }
+
+      .${BUTTON_CLASS}.${PROCESSING_CLASS} {
+        background: #ea580c !important;
+        border-color: #c2410c !important;
+        animation: vtt-spin 1s linear infinite !important;
+      }
+
+      .${BUTTON_CLASS}.${ERROR_CLASS} {
+        background: #991b1b !important;
+        border-color: #7f1d1d !important;
+        animation: vtt-shake 0.5s ease-in-out !important;
+      }
+
+      .${REMOVE_BUTTON_CLASS} {
+        background: #6b7280 !important;
+        color: #ffffff !important;
+        border-color: #4b5563 !important;
+        width: 32px !important;
+        height: 32px !important;
+      }
+
+      .${REMOVE_BUTTON_CLASS}:hover {
+        background: #dc2626 !important;
+        border-color: #b91c1c !important;
+        box-shadow: 0 4px 10px rgba(220, 38, 38, 0.3) !important;
+      }
+
+      @keyframes vtt-pulse {
+        0%, 100% {
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1), 0 0 0 0 rgba(220, 38, 38, 0.6);
+        }
+        50% {
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1), 0 0 0 8px rgba(220, 38, 38, 0);
+        }
+      }
+
+      @keyframes vtt-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+
+      @keyframes vtt-shake {
+        0%, 100% { transform: translateX(0); }
+        25% { transform: translateX(-5px); }
+        75% { transform: translateX(5px); }
+      }
+
+      .${BUTTON_CLASS} svg,
+      .${REMOVE_BUTTON_CLASS} svg {
+        display: block !important;
+        pointer-events: none !important;
+        width: 18px !important;
+        height: 18px !important;
+        flex-shrink: 0 !important;
+      }
+
+      .${REMOVE_BUTTON_CLASS} svg {
+        width: 16px !important;
+        height: 16px !important;
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  static createButtons(element) {
+    const container = document.createElement("div");
+    container.className = BUTTON_CONTAINER_CLASS;
+
+    const micButton = document.createElement("button");
+    micButton.type = "button";
+    micButton.className = BUTTON_CLASS;
+    micButton.innerHTML = this.getMicIcon();
+    micButton.title = DEFAULT_TITLE;
+    micButton.setAttribute("aria-label", DEFAULT_TITLE);
+
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = REMOVE_BUTTON_CLASS;
+    removeButton.innerHTML = this.getRemoveIcon();
+    removeButton.title = REMOVE_TITLE;
+    removeButton.setAttribute("aria-label", REMOVE_TITLE);
+
+    micButton.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.handleMicClick(element, micButton);
+    });
+
+    removeButton.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      this.handleRemoveClick(element);
+    });
+
+    container.appendChild(micButton);
+    container.appendChild(removeButton);
+
+    return { container, micButton, removeButton };
+  }
+
+  static handleMicClick(element, button) {
+    if (state.activeSession && state.activeSession.element === element) {
+      // Stop current session
+      state.activeSession.stop();
+    } else {
+      // Start new session
+      if (state.activeSession) {
+        state.activeSession.stop();
+      }
+
+      try {
+        const session = new VoiceRecognitionManager(element, button);
+        state.activeSession = session;
+        session.start();
+      } catch (error) {
+        console.error("[VTT] Failed to create session:", error);
+        this.showError(button, error.message);
+      }
+    }
+  }
+
+  static handleRemoveClick(element) {
+    console.log("[VTT] Remove button clicked");
+
+    if (state.activeSession && state.activeSession.element === element) {
+      state.activeSession.stop();
+    }
+
+    const buttons = state.buttonMap.get(element);
+    if (buttons) {
+      buttons.container.remove();
+      state.buttonMap.delete(element);
+    }
+  }
+
+  static setButtonState(button, stateType) {
+    button.classList.remove(LISTENING_CLASS, PROCESSING_CLASS, ERROR_CLASS);
+
+    switch (stateType) {
+      case "recording":
+        button.classList.add(LISTENING_CLASS);
+        button.innerHTML = this.getStopIcon();
+        button.title = RECORDING_TITLE;
+        button.setAttribute("aria-label", RECORDING_TITLE);
+        break;
+
+      case "processing":
+        button.classList.add(PROCESSING_CLASS);
+        button.innerHTML = this.getProcessingIcon();
+        button.title = PROCESSING_TITLE;
+        button.setAttribute("aria-label", PROCESSING_TITLE);
+        break;
+
+      case "error":
+        button.classList.add(ERROR_CLASS);
+        button.innerHTML = this.getMicIcon();
+        break;
+
+      case "idle":
+      default:
+        button.innerHTML = this.getMicIcon();
+        button.title = DEFAULT_TITLE;
+        button.setAttribute("aria-label", DEFAULT_TITLE);
+        break;
+    }
+  }
+
+  static showError(button, message) {
+    this.setButtonState(button, "error");
+    button.title = message;
+    button.setAttribute("aria-label", message);
+
+    setTimeout(() => {
+      if (!state.activeSession || state.activeSession.button !== button) {
+        this.setButtonState(button, "idle");
+      }
+    }, 3000);
+  }
+
+  static getMicIcon() {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+      <line x1="12" y1="19" x2="12" y2="23"/>
+      <line x1="8" y1="23" x2="16" y2="23"/>
+    </svg>`;
+  }
+
+  static getStopIcon() {
+    return `<svg viewBox="0 0 24 24" fill="currentColor">
+      <rect x="6" y="6" width="12" height="12" rx="2"/>
+    </svg>`;
+  }
+
+  static getProcessingIcon() {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M12 6v6l4 2"/>
+    </svg>`;
+  }
+
+  static getRemoveIcon() {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>`;
+  }
+}
+
+// ==================== ELEMENT DETECTOR ====================
+class ElementDetector {
+  static isEligible(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.dataset.vttIgnore === "true") return false;
+
+    if (element instanceof HTMLTextAreaElement && state.config.enableTextarea) {
+      return true;
+    }
+
+    if (element instanceof HTMLInputElement) {
+      const inputType = element.type || "text";
+      if (state.config.enabledInputTypes.includes(inputType)) {
+        return true;
+      }
+    }
+
+    if (state.config.customSelectors.length > 0) {
+      for (const selector of state.config.customSelectors) {
+        try {
+          if (element.matches(selector)) {
+            if (element instanceof HTMLInputElement ||
+                element instanceof HTMLTextAreaElement ||
+                TextManager.isContentEditable(element)) {
+              return true;
+            }
+          }
+        } catch (e) {
+          console.warn("[VTT] Invalid selector:", selector, e);
+        }
+      }
+    }
+
+    return false;
+  }
+
+  static attachButtons(element) {
+    if (state.buttonMap.has(element)) return;
+    if (!state.config.showButtons) return;
+    if (!ConfigManager.isSiteAllowed()) return;
+
+    const buttons = UIManager.createButtons(element);
+    element.insertAdjacentElement("afterend", buttons.container);
+    state.buttonMap.set(element, buttons);
+
+    console.log("[VTT] Buttons attached to:", element.tagName, element.type || "");
+  }
+
+  static scanForElements(root) {
+    if (!root) return;
+    if (!state.config.showButtons) return;
+    if (!ConfigManager.isSiteAllowed()) return;
+    if (!state.cachedEditableSelector) return;
+
+    if (root instanceof Element && this.isEligible(root)) {
+      this.attachButtons(root);
+    }
+
+    const nodes = root.querySelectorAll?.(state.cachedEditableSelector) || [];
+    for (const node of nodes) {
+      if (this.isEligible(node)) {
+        this.attachButtons(node);
+      }
+    }
+  }
+
+  static removeButtons(root) {
+    if (state.buttonMap.has(root)) {
+      const buttons = state.buttonMap.get(root);
+      if (state.activeSession && state.activeSession.element === root) {
+        state.activeSession.stop();
+      }
+      buttons.container.remove();
+      state.buttonMap.delete(root);
+    }
+
+    if (!state.cachedEditableSelector) return;
+
+    const nodes = root.querySelectorAll?.(state.cachedEditableSelector) || [];
+    for (const node of nodes) {
+      if (state.buttonMap.has(node)) {
+        const buttons = state.buttonMap.get(node);
+        if (state.activeSession && state.activeSession.element === node) {
+          state.activeSession.stop();
+        }
+        buttons.container.remove();
+        state.buttonMap.delete(node);
+      }
+    }
+  }
+
+  static refreshAll() {
+    console.log("[VTT] Refreshing all buttons");
+
+    if (!state.config.showButtons || !ConfigManager.isSiteAllowed()) {
+      for (const [element] of [...state.buttonMap.entries()]) {
+        this.removeButtons(element);
+      }
+      return;
+    }
+
+    for (const [element] of [...state.buttonMap.entries()]) {
+      if (!this.isEligible(element)) {
+        this.removeButtons(element);
+      }
+    }
+
+    this.scanForElements(document.body || document);
+  }
+}
+
+// ==================== MUTATION OBSERVER ====================
+function setupMutationObserver() {
+  if (state.mutationObserver) return;
+
+  state.mutationObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node instanceof Element) {
+          ElementDetector.scanForElements(node);
+        }
+      }
+
+      for (const node of mutation.removedNodes) {
+        if (node instanceof Element) {
+          ElementDetector.removeButtons(node);
+        }
+      }
+    }
+  });
+
+  state.mutationObserver.observe(document.documentElement || document.body, {
+    childList: true,
+    subtree: true
+  });
+}
+
+// ==================== STORAGE LISTENER ====================
+chrome.storage?.onChanged?.addListener((changes, area) => {
+  if (area !== "local") return;
+
+  let needsRefresh = false;
+  let needsRebuild = false;
+
+  if (changes.dictationLanguage) {
+    state.config.language = changes.dictationLanguage.newValue;
+    console.log("[VTT] Language changed to:", state.config.language);
+  }
+
+  if (changes.showVoiceButtons) {
+    state.config.showButtons = changes.showVoiceButtons.newValue;
+    needsRefresh = true;
+  }
+
+  if (changes.enableTextarea) {
+    state.config.enableTextarea = changes.enableTextarea.newValue;
+    needsRebuild = true;
+    needsRefresh = true;
+  }
+
+  if (changes.enabledInputTypes) {
+    state.config.enabledInputTypes = changes.enabledInputTypes.newValue;
+    needsRebuild = true;
+    needsRefresh = true;
+  }
+
+  if (changes.customSelectors) {
+    state.config.customSelectors = ConfigManager.parseMultiline(changes.customSelectors.newValue);
+    needsRebuild = true;
+    needsRefresh = true;
+  }
+
+  if (changes.allowedSites) {
+    state.config.allowedSites = ConfigManager.parseMultiline(changes.allowedSites.newValue);
+    needsRefresh = true;
+  }
+
+  if (needsRebuild) {
+    ConfigManager.buildEditableSelector();
+  }
+
+  if (needsRefresh) {
+    ElementDetector.refreshAll();
+  }
+});
+
+// ==================== INITIALIZATION ====================
+async function initialize() {
+  console.log("[VTT] Initializing Voice to Text extension");
+
+  await ConfigManager.load();
+  UIManager.initialize();
+
+  if (document.readyState !== "loading") {
+    ElementDetector.scanForElements(document.body || document);
+  } else {
+    document.addEventListener("DOMContentLoaded", () => {
+      ElementDetector.scanForElements(document.body || document);
+    }, { once: true });
+  }
+
+  setupMutationObserver();
+
+  console.log("[VTT] Initialization complete");
+}
+
+// Start the extension
+initialize();

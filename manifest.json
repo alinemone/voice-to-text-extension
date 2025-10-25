@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "تبدیل صدا به متن - Voice to Text",
-  "version": "2.0.0",
-  "description": "تبدیل آسان صدا به متن با Chrome Speech API - پشتیبانی از چندین زبان و کاملا قابل سفارشی‌سازی",
+  "version": "3.0.1",
+  "description": "افزونه حرفه‌ای تبدیل صدا به متن - ضبط مداوم بدون محدودیت، دستورات صوتی، UI زیبا و عملکرد بهینه",
   "permissions": [
     "storage",
     "scripting",
